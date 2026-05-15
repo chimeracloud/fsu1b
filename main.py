@@ -1,4 +1,4 @@
-"""Betfair Stream Recorder — FastAPI entrypoint (SHELL).
+"""FSU1B — Betfair Stream Recorder — FastAPI entrypoint (SHELL).
 
 Phase 1 of the recorder build: all endpoints exist and return
 plausible mock responses so we can verify the deploy + auth path
@@ -55,15 +55,15 @@ async def lifespan(app: FastAPI):
     app.state.settings = RecorderSettings()
     app.state.shell_mode = True  # Phase 1 flag — remove in Phase 2
     app.state.started_at = _iso_now()
-    logger.info("betfair-recorder shell live (Phase 1 — no recording yet)")
+    logger.info("FSU1B shell live (Phase 1 — no recording yet)")
     try:
         yield
     finally:
-        logger.info("betfair-recorder shut down")
+        logger.info("FSU1B shut down")
 
 
 app = FastAPI(
-    title="Chimera Betfair Stream Recorder",
+    title="FSU1B — Chimera Betfair Stream Recorder",
     description=(
         "Records raw Betfair MarketBook data as NDJSON for replay and "
         "audit. Pure capture — no calculations, no P&L, no aggregation."
@@ -100,7 +100,8 @@ async def get_status() -> dict[str, Any]:
     """
 
     return {
-        "service": "betfair-recorder",
+        "service": "fsu1b-stream-recorder",
+        "fsu": "FSU1B",
         "version": "0.1.0",
         "shell_mode": app.state.shell_mode,
         "recording": False,

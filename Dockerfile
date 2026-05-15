@@ -1,8 +1,8 @@
-# Betfair Stream Recorder — single Cloud Run service.
+# FSU1B — Betfair Stream Recorder — single Cloud Run service.
 # Build context: this directory.
 #
-#   docker build -t betfair-recorder .
-#   docker run -p 8080:8080 betfair-recorder
+#   docker build -t fsu1b-stream-recorder .
+#   docker run -p 8080:8080 fsu1b-stream-recorder
 
 FROM python:3.12-slim AS base
 

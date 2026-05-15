@@ -1,12 +1,12 @@
-# Cloud Build trigger config for betfair-recorder.
+# Cloud Build trigger config for FSU1B (Betfair Stream Recorder).
 #
 # Setup (one-time, GUI step):
 #   1. Cloud Build → Triggers → Connect Repository → GitHub
-#   2. Select chimeracloud/betfair-recorder
+#   2. Select chimeracloud/fsu1b
 #   3. Create trigger from this file (Branch pattern: ^main$)
 #
 # Once connected, every push to main → builds Dockerfile → deploys
-# to Cloud Run service betfair-recorder (europe-west2, chiops).
+# to Cloud Run service fsu1b-stream-recorder (europe-west2, chiops).
 
 steps:
   - id: Build
@@ -53,9 +53,9 @@ substitutions:
   _AR_REPOSITORY: cloud-run-source-deploy
   _DEPLOY_REGION: europe-west2
   _PLATFORM: managed
-  _SERVICE_NAME: betfair-recorder
+  _SERVICE_NAME: fsu1b-stream-recorder
 
 tags:
   - gcp-cloud-build-deploy-cloud-run
   - gcp-cloud-build-deploy-cloud-run-managed
-  - betfair-recorder
+  - fsu1b-stream-recorder

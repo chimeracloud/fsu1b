@@ -1,9 +1,20 @@
-# Betfair Stream Recorder
+# FSU1B — Betfair Stream Recorder
 
 **Standalone tape recorder for Betfair MarketBook data.**
-Repo: `chimeracloud/betfair-recorder` ·
-Cloud Run service: `betfair-recorder` (`europe-west2`, project `chiops`) ·
-Bucket: `gs://chiops-betfair-recording/`
+
+| | |
+|---|---|
+| FSU | **FSU1B** |
+| Repo | `chimeracloud/fsu1b` |
+| Cloud Run service | `fsu1b-stream-recorder` (`europe-west2`, project `chiops`) |
+| Service account | `fsu1b-sa@chiops.iam.gserviceaccount.com` |
+| GCS bucket | `gs://chiops-betfair-recording/` |
+
+> **Naming convention note.** The service / SA / repo follow FSU naming.
+> The bucket follows CHI-POL-009 (`chiops-{product}-{function}`) and
+> stays as `chiops-betfair-recording`. The GCP service account ID
+> minimum is 6 characters, so the SA is `fsu1b-sa` not `fsu1b` —
+> matches the existing `fsu1e-sa` convention.
 
 ---
 
@@ -14,10 +25,10 @@ markets as NDJSON, one line per update. It does **not** calculate
 anything. No P&L, no commission, no aggregations, no derived values.
 It writes what Betfair sends. Nothing else.
 
-The recorder runs independently of CLE V2. If CLE V2 crashes,
-redeploys, or is stopped, the recorder keeps recording. Both services
-maintain their own Betfair stream subscription using the same
-credentials (Betfair allows concurrent streams per account).
+FSU1B runs independently of CLE V2. If CLE V2 crashes, redeploys, or
+is stopped, FSU1B keeps recording. Both services maintain their own
+Betfair stream subscription using the same credentials (Betfair
+allows concurrent streams per account).
 
 ---
 
@@ -47,10 +58,12 @@ credentials (Betfair allows concurrent streams per account).
 | `gcs.py` | Phase 2 — GCS upload + download + meta file writer |
 | `auth.py` | Phase 2 — Betfair client builder (Secret Manager creds) |
 | `Dockerfile` | Cloud Run build context |
+| `cloudbuild.yaml` | Cloud Build trigger config |
 | `requirements.txt` | Pinned Python deps |
 
-Phase 1 (this commit) is the **shell**: all endpoints exist and
-return plausible mock responses. Phase 2 wires the recording logic.
+Phase 1 (current state) is the **shell**: all endpoints exist and
+return plausible mock responses tagged `shell_mode: true`. Phase 2
+wires the recording logic.
 
 ---
 
@@ -104,7 +117,8 @@ the same MarketBook objects can be reconstructed from the NDJSON.
 
 ## Storage layout
 
-`gs://chiops-betfair-recording/`
+`gs://chiops-betfair-recording/` (bucket name follows CHI-POL-009,
+not FSU naming).
 
 ```
 horse-racing/
@@ -161,16 +175,17 @@ Health:
 
 ## Build + deploy
 
-Cloud Build trigger (set up via Phase 1 deploy) watches `main` branch,
-builds `Dockerfile`, deploys to Cloud Run service `betfair-recorder`.
+Cloud Build trigger (set up via GUI one-time step — see `cloudbuild.yaml`)
+watches `main` branch, builds `Dockerfile`, deploys to Cloud Run
+service `fsu1b-stream-recorder`.
 
 Manual deploy:
 
 ```bash
-gcloud run deploy betfair-recorder \
+gcloud run deploy fsu1b-stream-recorder \
   --source . \
   --region europe-west2 \
-  --service-account betfair-recorder@chiops.iam.gserviceaccount.com \
+  --service-account fsu1b-sa@chiops.iam.gserviceaccount.com \
   --no-allow-unauthenticated \
   --memory 1Gi --cpu 1 \
   --min-instances 1 --max-instances 1 \
@@ -188,7 +203,7 @@ would create duplicate streams and overwrite each other's writes.
 
 | Phase | Status |
 |---|---|
-| Phase 1 — shell (all endpoints, no recording) | This commit |
+| Phase 1 — shell (all endpoints, no recording) | ✅ Deployed |
 | Phase 2 — Betfair connection + NDJSON capture + GCS upload + rollover | Pending |
 | Phase 3 — portal Data Recorder page in CST | Pending |
 
@@ -200,18 +215,17 @@ When the shell is verified healthy, Phase 2 will add `recorder.py`,
 ## Why a separate service from CLE V2
 
 **Independent failure domains.** CLE V2 makes decisions and places
-bets. The recorder captures data. They have different reliability
-needs. CLE V2 can be down for hours while a strategy is tuned. The
-recorder must run continuously so we never lose data. Coupling them
-in one service means a CLE V2 redeploy interrupts the recording —
-unacceptable.
+bets. FSU1B captures data. They have different reliability needs.
+CLE V2 can be down for hours while a strategy is tuned. FSU1B must
+run continuously so we never lose data. Coupling them in one service
+means a CLE V2 redeploy interrupts the recording — unacceptable.
 
-**Different resource patterns.** CLE V2 is CPU-bound at decision time
-(evaluator runs many comparisons per market). The recorder is I/O
-bound (serialise, buffer, write). Separating them lets each have its
-own resource profile.
+**Different resource patterns.** CLE V2 is CPU-bound at decision
+time (evaluator runs many comparisons per market). FSU1B is I/O
+bound (serialise, buffer, write). Separating them lets each have
+its own resource profile.
 
-**Different deployment cadence.** CLE V2 will change often as strategy
-evolves. The recorder is set-and-forget. Each redeploy of the recorder
-costs a few seconds of stream disconnect — for the recorder, that's a
-real loss. For CLE V2, it's irrelevant.
+**Different deployment cadence.** CLE V2 will change often as
+strategy evolves. FSU1B is set-and-forget. Each redeploy of FSU1B
+costs a few seconds of stream disconnect — for the recorder, that's
+a real loss. For CLE V2, it's irrelevant.
