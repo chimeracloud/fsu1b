@@ -45,6 +45,11 @@ allows concurrent streams per account).
    locally, and continues. No data loss across restarts.
 4. **Independent of CLE V2.** Same Betfair account, different stream
    connection. No shared state. No cascading failures.
+5. **Auto-starts on boot.** Unlike CLE V2 (which boots STOPPED so it
+   never silently places bets), FSU1B boots RECORDING. A recorder
+   places no bets — the worst case of auto-recording is "more data
+   captured", never "money lost". The operator should never have to
+   wonder whether recording is on. See *Auto-start* below.
 
 ---
 
@@ -61,9 +66,9 @@ allows concurrent streams per account).
 | `cloudbuild.yaml` | Cloud Build trigger config |
 | `requirements.txt` | Pinned Python deps |
 
-Phase 1 (current state) is the **shell**: all endpoints exist and
-return plausible mock responses tagged `shell_mode: true`. Phase 2
-wires the recording logic.
+All phases are live: real Betfair streaming, NDJSON serialisation,
+GCS flush/rollover, and the CST portal page are deployed. Responses
+report `shell_mode: false`.
 
 ---
 
@@ -173,6 +178,42 @@ Health:
 
 ---
 
+## Auto-start
+
+FSU1B **boots into RECORDING**. On container start, `lifespan` spawns
+a daemon thread (`fsu1b-autostart`) that calls `recorder.start()` with
+backoff retry — 12 attempts, `min(30, 5·attempt)` seconds apart — so a
+transient Secret Manager / Betfair-auth hiccup at boot doesn't leave
+the recorder silently idle. The start runs off the request path, so
+the container reports READY immediately even while Betfair login is
+still in flight.
+
+This is **deliberately the inverse of CLE V2**, which boots STOPPED so
+it can never silently place bets after a deploy. The reasoning differs
+because the risk differs:
+
+| | CLE V2 | FSU1B |
+|---|---|---|
+| Boots | STOPPED | RECORDING |
+| Worst case of auto-on | money lost (unintended bets) | more data captured |
+| Worst case of auto-off | strategy paused (recoverable) | **data lost forever** |
+
+A recorder places no bets. The only failure that actually costs
+something is *not recording* — a gap in the tape can never be
+back-filled. So the safe default is "always on". The operator should
+never have to remember to press start, and a deploy mid-day simply
+reconnects and **appends to the same trading-day file** (the recorder
+downloads the existing GCS NDJSON on start, so the few seconds of
+disconnect is the only loss, not the whole day).
+
+To override for a one-off (e.g. a maintenance window), `PUT
+/admin/config` with `{"auto_start": false}` then redeploy — but the
+dataclass default is `True` and that is the intended steady state.
+`GET /admin/status` reports the live `auto_start` value alongside
+`recording`.
+
+---
+
 ## Build + deploy
 
 Cloud Build trigger (set up via GUI one-time step — see `cloudbuild.yaml`)
@@ -204,11 +245,13 @@ would create duplicate streams and overwrite each other's writes.
 | Phase | Status |
 |---|---|
 | Phase 1 — shell (all endpoints, no recording) | ✅ Deployed |
-| Phase 2 — Betfair connection + NDJSON capture + GCS upload + rollover | Pending |
-| Phase 3 — portal Data Recorder page in CST | Pending |
+| Phase 2 — Betfair connection + NDJSON capture + GCS upload + rollover | ✅ Deployed |
+| Phase 3 — portal Data Recorder page in CST | ✅ Deployed |
+| Auto-start on boot (records by default, resumes day's file) | ✅ Deployed |
 
-When the shell is verified healthy, Phase 2 will add `recorder.py`,
-`gcs.py`, and `auth.py`, and wire them into `main.py::lifespan`.
+Smoke-tested end-to-end: a live session captured 1,647 updates across
+90 markets / 12 venues, with the NDJSON file and meta sidecar written
+to GCS and replayable via `/api/replay/{date}`.
 
 ---
 

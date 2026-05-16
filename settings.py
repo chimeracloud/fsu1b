@@ -32,6 +32,15 @@ class RecorderSettings:
     # Daily rollover (UTC hour at which a new file begins)
     rollover_hour_utc: int = 12
 
+    # Auto-start recording on container boot. TRUE by default —
+    # deliberately the inverse of CLE V2's "boot in STOPPED" stance.
+    # A recorder places no bets, so the worst case of auto-recording
+    # is "more data captured", never "money lost". Operator should
+    # never have to wonder whether recording is on. On any container
+    # restart the recorder re-attaches and resumes the same trading
+    # day's file (downloads the existing GCS NDJSON, appends).
+    auto_start: bool = True
+
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 

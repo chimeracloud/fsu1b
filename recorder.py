@@ -191,6 +191,7 @@ class Recorder:
             "version": "0.2.0",
             "shell_mode": False,
             "recording": self.is_recording,
+            "auto_start": self._settings.auto_start,
             "stream_status": self._stream_status,
             "current_file": (
                 gcs.gcs_ndjson_path(self._current_date)

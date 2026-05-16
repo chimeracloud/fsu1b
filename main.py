@@ -26,6 +26,8 @@ import asyncio
 import json
 import logging
 import re
+import threading
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any
@@ -49,17 +51,58 @@ logger = logging.getLogger(__name__)
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
+def _auto_start_with_retry(recorder: Recorder) -> None:
+    """Bring the recorder up in the background with backoff.
+
+    Runs off the request path so the container becomes READY
+    immediately even while Betfair login is in flight. Retries a
+    transient failure (Secret Manager blip, Betfair auth hiccup at
+    boot) so an unattended restart reliably ends up recording rather
+    than silently dead.
+    """
+
+    for attempt in range(12):
+        try:
+            result = recorder.start()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("FSU1B auto-start attempt %d raised: %s", attempt + 1, exc)
+            result = {"accepted": False}
+        if result.get("accepted") or recorder.is_recording:
+            logger.info("FSU1B auto-start succeeded (attempt %d)", attempt + 1)
+            return
+        backoff = min(30, 5 * (attempt + 1))
+        logger.warning(
+            "FSU1B auto-start attempt %d not accepted (%s); retrying in %ds",
+            attempt + 1, result.get("detail", "unknown"), backoff,
+        )
+        time.sleep(backoff)
+    logger.error(
+        "FSU1B auto-start exhausted retries — recorder is idle. "
+        "Manual POST /admin/control/start required."
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    app.state.recorder = Recorder(RecorderSettings())
-    logger.info(
-        "FSU1B live (Phase 2). Recorder NOT started — POST "
-        "/admin/control/start to begin recording."
-    )
+    recorder = Recorder(RecorderSettings())
+    app.state.recorder = recorder
+    if recorder.settings.auto_start:
+        logger.info("FSU1B live — auto_start=True, bringing recorder up in background")
+        threading.Thread(
+            target=_auto_start_with_retry,
+            args=(recorder,),
+            name="fsu1b-autostart",
+            daemon=True,
+        ).start()
+    else:
+        logger.info(
+            "FSU1B live — auto_start=False, recorder idle. "
+            "POST /admin/control/start to begin recording."
+        )
     try:
         yield
     finally:
-        app.state.recorder.shutdown()
+        recorder.shutdown()
         logger.info("FSU1B shut down")
 
 
