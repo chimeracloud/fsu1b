@@ -1,27 +1,29 @@
-"""FSU1B — Betfair Stream Recorder — FastAPI entrypoint (SHELL).
+"""FSU1B — Betfair Stream Recorder — FastAPI entrypoint (PHASE 2).
 
-Phase 1 of the recorder build: all endpoints exist and return
-plausible mock responses so we can verify the deploy + auth path
-before wiring the actual recording logic.
+Phase 2: real recording wired in. The Recorder owns the Betfair
+stream, the NDJSON buffer, and the GCS flush/rollover lifecycle.
+This module is just the HTTP surface over it.
 
-Phase 2 will replace each mock response with real data from the
-recorder module (recorder.py).
-
-Architectural rules baked in from the brief:
+Architectural rules from the brief, still in force:
 
 * This service is a TAPE RECORDER. It records, it does not
   calculate. No P&L, no aggregation, no derived values.
 * It runs independently of CLE V2. CLE V2 crashing or redeploying
-  has no effect on this service.
+  has no effect on this service. Separate Betfair stream
+  subscription, separate GCS bucket, separate service account.
 * Daily file rolls at 12:00 UTC. New file = new day.
-* On restart mid-day, append to the same daily file.
+* On restart mid-day, append to the same daily file (the Recorder
+  downloads the existing GCS file to /tmp on start).
 
-Phase 1 mock responses are clearly labelled so the operator sees
-"shell live" rather than thinking recording has started.
+The recorder does NOT auto-start on boot. The operator must call
+POST /admin/control/start. This is deliberate — a deploy should
+never silently begin a new recording stream.
 """
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import re
 from contextlib import asynccontextmanager
@@ -30,8 +32,11 @@ from typing import Any
 
 from fastapi import Body, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from sse_starlette.sse import EventSourceResponse
 
+import gcs
+from recorder import Recorder
 from settings import RecorderSettings
 
 logging.basicConfig(
@@ -44,21 +49,17 @@ logger = logging.getLogger(__name__)
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Lifespan — in Phase 1 this just holds the settings object. Phase 2 spins
-# up the recorder thread.
-# ──────────────────────────────────────────────────────────────────────────────
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    app.state.settings = RecorderSettings()
-    app.state.shell_mode = True  # Phase 1 flag — remove in Phase 2
-    app.state.started_at = _iso_now()
-    logger.info("FSU1B shell live (Phase 1 — no recording yet)")
+    app.state.recorder = Recorder(RecorderSettings())
+    logger.info(
+        "FSU1B live (Phase 2). Recorder NOT started — POST "
+        "/admin/control/start to begin recording."
+    )
     try:
         yield
     finally:
+        app.state.recorder.shutdown()
         logger.info("FSU1B shut down")
 
 
@@ -66,9 +67,10 @@ app = FastAPI(
     title="FSU1B — Chimera Betfair Stream Recorder",
     description=(
         "Records raw Betfair MarketBook data as NDJSON for replay and "
-        "audit. Pure capture — no calculations, no P&L, no aggregation."
+        "audit. Pure capture — no calculations, no P&L, no aggregation. "
+        "Independent of CLE V2."
     ),
-    version="0.1.0",
+    version="0.2.0",
     lifespan=lifespan,
 )
 
@@ -93,100 +95,71 @@ app.add_middleware(
 
 @app.get("/admin/status", tags=["admin"])
 async def get_status() -> dict[str, Any]:
-    """Recorder state.
-
-    Phase 1 mock: recording=False, no file yet. Phase 2 will return
-    live counts + current file path + updates/min.
-    """
-
-    return {
-        "service": "fsu1b-stream-recorder",
-        "fsu": "FSU1B",
-        "version": "0.1.0",
-        "shell_mode": app.state.shell_mode,
-        "recording": False,
-        "stream_status": "DISCONNECTED",
-        "current_file": None,
-        "markets_tracked": 0,
-        "updates_recorded": 0,
-        "file_size_bytes": 0,
-        "recording_since": None,
-        "started_at": app.state.started_at,
-        "timestamp": _iso_now(),
-    }
+    return app.state.recorder.status()
 
 
 @app.get("/admin/config", tags=["admin"])
 async def get_config() -> dict[str, Any]:
-    return app.state.settings.to_dict()
+    return app.state.recorder.settings.to_dict()
 
 
 @app.put("/admin/config", tags=["admin"])
 async def put_config(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
-    """Replace recorder settings. In Phase 2 this persists to GCS."""
+    """Replace recorder settings.
+
+    Settings changes take effect on the NEXT recording session — the
+    market filter / flush cadence can't change mid-stream without
+    re-subscribing. Operator should stop, update config, start.
+    """
 
     try:
         new_settings = RecorderSettings.from_dict(payload)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=400, detail=f"invalid settings: {exc}") from exc
-    app.state.settings = new_settings
-    return {"settings": new_settings.to_dict(), "persisted": False, "shell_mode": True}
+    app.state.recorder.replace_settings(new_settings)
+    return {
+        "settings": new_settings.to_dict(),
+        "note": "applies to next recording session — stop + start to take effect",
+    }
 
 
 @app.get("/admin/stats", tags=["admin"])
 async def get_stats() -> dict[str, Any]:
-    """Recorder activity stats. Phase 1 mock returns zeros."""
-
-    return {
-        "shell_mode": app.state.shell_mode,
-        "updates_per_minute": 0,
-        "file_size_bytes": 0,
-        "markets_count": 0,
-        "last_update_at": None,
-        "timestamp": _iso_now(),
-    }
+    return app.state.recorder.stats()
 
 
 @app.post("/admin/control/start", tags=["admin"])
 async def post_control_start() -> dict[str, Any]:
-    """In Phase 2 this starts the Betfair stream + recording loop.
-    Phase 1 returns a clear "shell only" notice."""
+    """Begin recording. Idempotent."""
 
-    return {
-        "action": "start",
-        "accepted": False,
-        "shell_mode": True,
-        "detail": "Phase 1 shell — recording logic not yet implemented",
-    }
+    return app.state.recorder.start()
 
 
 @app.post("/admin/control/stop", tags=["admin"])
 async def post_control_stop() -> dict[str, Any]:
-    return {
-        "action": "stop",
-        "accepted": False,
-        "shell_mode": True,
-        "detail": "Phase 1 shell — nothing to stop",
-    }
+    """Stop recording. Flushes remaining buffer + writes meta sidecar."""
+
+    return app.state.recorder.stop()
 
 
 @app.get("/admin/events", tags=["admin"])
 async def get_events():
-    """SSE stream. Phase 1 emits a single 'shell_mode' notice and exits."""
+    """SSE — emits a status frame every 5s while the connection is open.
+
+    The recorder doesn't have a discrete event bus (it's a tape
+    recorder, not a decision engine), so this streams periodic
+    status snapshots — enough for the portal to render a live tile
+    without polling.
+    """
 
     async def event_iter():
-        import asyncio
-        yield {
-            "event": "shell_mode",
-            "data": (
-                '{"detail":"Phase 1 shell — no recording events yet"}'
-            ),
-        }
-        # Keep the connection alive with a heartbeat so the portal
-        # doesn't see it as a hard close. 15s ping.
-        for _ in range(20):
-            await asyncio.sleep(15)
-            yield {"event": "heartbeat", "data": '{"ts":"' + _iso_now() + '"}'}
+        while True:
+            status = app.state.recorder.status()
+            yield {
+                "event": "status",
+                "data": json.dumps(status, default=str),
+            }
+            await asyncio.sleep(5)
 
     return EventSourceResponse(event_iter())
 
@@ -198,51 +171,63 @@ async def get_events():
 
 @app.get("/api/recordings", tags=["api"])
 async def list_recordings() -> dict[str, Any]:
-    """List all daily recording files. Phase 1 returns empty list."""
+    """List all daily recording files in the bucket, newest first."""
 
-    return {
-        "shell_mode": app.state.shell_mode,
-        "recordings": [],
-    }
+    try:
+        recs = gcs.list_recordings()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"GCS list failed: {exc}") from exc
+    # Enrich with meta sidecar info where available
+    for r in recs:
+        try:
+            meta = gcs.get_meta(r["date"])
+            if meta:
+                r["markets_recorded"] = meta.get("markets_recorded")
+                r["total_updates"] = meta.get("total_updates")
+                r["venues"] = meta.get("venues", [])
+        except Exception:  # noqa: BLE001
+            pass
+    return {"recordings": recs}
 
 
 @app.get("/api/recordings/{date}", tags=["api"])
 async def get_recording_meta(date: str) -> dict[str, Any]:
-    """Metadata for one day's recording.
-
-    Phase 1 returns 404 for every date — no recordings exist yet.
-    """
-
     if not _DATE_RE.match(date):
         raise HTTPException(status_code=400, detail="date must be YYYY-MM-DD")
-    raise HTTPException(
-        status_code=404,
-        detail=f"no recording for {date} (shell mode — no data yet)",
-    )
+    meta = gcs.get_meta(date)
+    if meta is None:
+        raise HTTPException(status_code=404, detail=f"no recording for {date}")
+    return meta
 
 
 @app.get("/api/replay/{date}", tags=["api"])
 async def replay_recording(date: str):
-    """Stream a day's NDJSON for replay. Phase 1 returns 404."""
+    """Stream the day's NDJSON line-by-line for replay."""
 
     if not _DATE_RE.match(date):
         raise HTTPException(status_code=400, detail="date must be YYYY-MM-DD")
-    raise HTTPException(
-        status_code=404,
-        detail=f"no recording for {date} (shell mode — no data yet)",
-    )
+
+    def line_iter():
+        any_lines = False
+        for line in gcs.stream_ndjson(date):
+            any_lines = True
+            yield line + "\n"
+        if not any_lines:
+            # Nothing streamed — surface a 404-ish marker in-band since
+            # we've already started a 200 stream.
+            yield json.dumps({"error": f"no recording for {date}"}) + "\n"
+
+    return StreamingResponse(line_iter(), media_type="application/x-ndjson")
 
 
 @app.get("/api/download/{date}", tags=["api"])
-async def download_recording(date: str):
-    """Download a day's NDJSON file. Phase 1 returns 404."""
-
+async def download_recording(date: str) -> dict[str, Any]:
     if not _DATE_RE.match(date):
         raise HTTPException(status_code=400, detail="date must be YYYY-MM-DD")
-    raise HTTPException(
-        status_code=404,
-        detail=f"no recording for {date} (shell mode — no data yet)",
-    )
+    url = gcs.download_url(date)
+    if url is None:
+        raise HTTPException(status_code=404, detail=f"no recording for {date}")
+    return {"date": date, "gcs_uri": url, "note": "use /api/replay for streaming access"}
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -257,19 +242,21 @@ async def health() -> dict[str, str]:
 
 @app.get("/ready", tags=["meta"])
 async def ready() -> dict[str, Any]:
-    """Readiness probe. In Phase 2 also checks Betfair session + GCS reach."""
+    """Readiness — GCS reachable. Betfair session only checked while
+    recording (we don't hold an idle session)."""
 
+    gcs_ok = True
+    try:
+        gcs.list_recordings()
+    except Exception:  # noqa: BLE001
+        gcs_ok = False
+    rec = app.state.recorder
     return {
-        "status": "ok",
-        "shell_mode": app.state.shell_mode,
-        "betfair_session": "not_checked_in_shell",
-        "gcs_reachable": "not_checked_in_shell",
+        "status": "ok" if gcs_ok else "degraded",
+        "recording": rec.is_recording,
+        "stream_status": rec.status().get("stream_status"),
+        "gcs_reachable": gcs_ok,
     }
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Helpers
-# ──────────────────────────────────────────────────────────────────────────────
 
 
 def _iso_now() -> str:

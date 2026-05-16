@@ -26,7 +26,7 @@ RUN pip install --upgrade pip \
     && pip install -r requirements.txt
 
 # Application code
-COPY settings.py main.py ./
+COPY settings.py auth.py gcs.py recorder.py main.py ./
 
 RUN groupadd --system app && useradd --system --gid app --home-dir /app app \
     && chown -R app:app /app
