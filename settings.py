@@ -32,14 +32,17 @@ class RecorderSettings:
     # Daily rollover (UTC hour at which a new file begins)
     rollover_hour_utc: int = 12
 
-    # Auto-start recording on container boot. TRUE by default —
-    # deliberately the inverse of CLE V2's "boot in STOPPED" stance.
-    # A recorder places no bets, so the worst case of auto-recording
-    # is "more data captured", never "money lost". Operator should
-    # never have to wonder whether recording is on. On any container
-    # restart the recorder re-attaches and resumes the same trading
-    # day's file (downloads the existing GCS NDJSON, appends).
-    auto_start: bool = True
+    # Auto-start recording on container boot. FALSE — hardened after the
+    # 2026-05-17 incident. FSU1B currently shares the SAME Betfair
+    # account/app key as the live engine (CLE V2). If the recorder
+    # auto-resumes on a stray Cloud Run restart while the engine is
+    # trading, it re-grabs the shared Betfair session and the live
+    # engine's session is invalidated (INVALID_SESSION_INFORMATION) —
+    # i.e. it takes the money engine down. Until FSU1B has its own
+    # Betfair app key (or the single-gateway redesign lands), the
+    # recorder must be started EXPLICITLY via POST /admin/control/start
+    # so a container restart can never silently take out live betting.
+    auto_start: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
