@@ -21,8 +21,8 @@ Full architecture: `audit/reports/FSU1B_Betfair_Gateway_Architecture.md`.
 
 | Phase | Status | What |
 |---|---|---|
-| 1 — Shell | in progress | Standard FSU shell, no Betfair |
-| 2 — Stream + all sports | pending | LIVE key, eventTypeIds 7/1/2, per-sport SSE |
+| 1 — Shell | done | Standard FSU shell, no Betfair |
+| 2 — Stream + all sports | in progress | LIVE key, eventTypeIds 7/1/2, per-sport SSE, watchdog |
 | 3 — REST | pending | DELAYED-key reads + LIVE-key writes |
 | 4 — Integration | pending | Portal proxy, envelope, manifest, registries |
 | 5 — Testing | pending | 24h soak, DRY_RUN parity, £2 live bet |
@@ -52,25 +52,36 @@ curl localhost:8080/admin/config
 pytest -q
 ```
 
-## Phase 1 endpoints
+## Phase 2 endpoints
 
 ### Standard observability (identical across all FSUs)
 
 - `GET /health` — liveness
-- `GET /ready` — readiness (Phase 2+ gates on stream freshness + REST auth)
+- `GET /ready` — readiness; 503 when session running but stream stale
 - `GET /info` — service identity
-- `GET /metrics` — Prometheus plaintext
+- `GET /metrics` — Prometheus plaintext (uptime, mcm total, reconnects, recent rate, stream age)
 - `GET /status` — composite status
 
 ### Set 1 — admin (CHI-ADR-010)
 
-- `GET /admin/status`
+- `GET /admin/status` — real LIVE-session + stream state + subscription counts
 - `GET /admin/config`
-- `PUT /admin/config`
+- `PUT /admin/config` — in-memory only (Phase 4 wires GCS persistence)
 - `GET /admin/stats`
 - `GET /admin/activity`
-- `POST /admin/control/{start|stop|pause|resume|reconnect_stream|relogin_rest|test}`
-- `GET /admin/events` — SSE
+- `POST /admin/control/{start|stop|reconnect_stream|test}` — wired
+- `POST /admin/control/{pause|resume|relogin_rest}` — accepted, wires up in Phase 3
+- `GET /admin/events` — SSE (real events in Phase 4)
+
+### Set 3 — stream + market reads (Phase 2)
+
+- `GET /stream/horse-racing` — SSE per-sport (eventTypeId 7)
+- `GET /stream/football` — SSE per-sport (eventTypeId 1)
+- `GET /stream/tennis` — SSE per-sport (eventTypeId 2)
+- `GET /stream/all` — SSE firehose
+- `GET /stream/snapshot?sport=&event_type_id=` — full cache JSON for cold-start
+- `GET /markets?sport=&event_type_id=&status=` — summary list
+- `GET /markets/{market_id}` — full market state with runner ladders
 
 ## Naming
 

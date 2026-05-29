@@ -1,4 +1,4 @@
-"""Phase 1 — verify the standard observability shell is wired."""
+"""Phase 2 — observability shell with stream-freshness-aware /ready."""
 
 
 def test_health_returns_ok(client):
@@ -7,12 +7,14 @@ def test_health_returns_ok(client):
     assert r.json()["status"] == "ok"
 
 
-def test_ready_is_true_in_phase_1(client):
+def test_ready_idle_when_session_not_started(client):
+    """auto_start=False default → /ready 200 with mode=idle."""
     r = client.get("/ready")
     assert r.status_code == 200
     body = r.json()
     assert body["ready"] is True
-    assert body["phase"] == 1
+    assert body["mode"] == "idle"
+    assert body["phase"] == 2
 
 
 def test_info_identifies_service(client):
@@ -20,7 +22,7 @@ def test_info_identifies_service(client):
     assert r.status_code == 200
     body = r.json()
     assert body["service"] == "fsu1b"
-    assert body["phase"] == 1
+    assert body["phase"] == 2
     assert "version" in body
 
 
@@ -29,6 +31,8 @@ def test_metrics_is_prometheus_plaintext(client):
     assert r.status_code == 200
     assert "text/plain" in r.headers["content-type"]
     assert "fsu1b_uptime_seconds" in r.text
+    assert "fsu1b_mcm_total" in r.text
+    assert "fsu1b_reconnects_total" in r.text
 
 
 def test_status_has_uptime_and_now(client):
@@ -36,6 +40,8 @@ def test_status_has_uptime_and_now(client):
     assert r.status_code == 200
     body = r.json()
     assert body["service"] == "fsu1b"
-    assert body["phase"] == 1
+    assert body["phase"] == 2
     assert "uptime_s" in body
     assert "now" in body
+    assert "stream_status" in body
+    assert "mcm_count" in body
