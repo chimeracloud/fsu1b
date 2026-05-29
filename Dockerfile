@@ -1,5 +1,5 @@
 # FSU1B — Betfair Exchange Gateway
-# Phase 2: async TLS stream, per-sport SSE, watchdog.
+# Phase 3: + betfairlightweight REST helper (DELAYED key reads, LIVE writes).
 
 FROM python:3.12-slim
 
@@ -10,9 +10,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# CA certs only — pure asyncio TLS for the stream, requests for REST.
+# CA certs for HTTPS, build-essential for betfairlightweight[speed] C wheels
+# (ciso8601, ujson, lz4).
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
+        build-essential \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt ./

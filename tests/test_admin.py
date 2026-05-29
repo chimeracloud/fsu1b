@@ -6,7 +6,7 @@ def test_admin_status_shape(client):
     assert r.status_code == 200
     body = r.json()
     assert body["service"] == "fsu1b"
-    assert body["phase"] == 2
+    assert body["phase"] == 3
     assert body["live_session"]["state"] == "not_started"
     assert body["delayed_session"]["state"] == "not_started"
     assert body["subscriptions"]["market_count"] == 0
@@ -58,13 +58,20 @@ def test_admin_activity_empty_at_boot(client):
     assert r.json() == {"events": []}
 
 
-def test_admin_control_pause_accepted_unwired(client):
-    """pause/resume/relogin_rest are accepted but Phase 3 wires the action."""
-    r = client.post("/admin/control/pause")
-    assert r.status_code == 200
-    body = r.json()
-    assert body["accepted"] is True
-    assert body["executed"] is False
+def test_admin_control_pause_now_wired(client):
+    """Phase 3: pause wires through to app_state.orders_paused."""
+    from core.state import app_state
+
+    try:
+        r = client.post("/admin/control/pause")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["accepted"] is True
+        assert body["executed"] is True
+        assert app_state.orders_paused is True
+    finally:
+        # Reset so other tests aren't affected.
+        client.post("/admin/control/resume")
 
 
 def test_admin_control_test_verb(client):

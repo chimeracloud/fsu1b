@@ -23,7 +23,7 @@ from fastapi import FastAPI
 from core.config import get_settings
 from core.logging import configure_logging
 from core.version import SERVICE_DESCRIPTION, SERVICE_NAME, VERSION
-from services import admin, observability, stream_routes
+from services import admin, observability, rest_routes, stream_routes
 from services.stream_session import stream_session
 
 logger = logging.getLogger(__name__)
@@ -66,3 +66,4 @@ app = FastAPI(
 app.include_router(observability.router)
 app.include_router(admin.router)
 app.include_router(stream_routes.router)
+app.include_router(rest_routes.router)

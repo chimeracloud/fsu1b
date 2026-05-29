@@ -49,6 +49,11 @@ class AppState:
         self.reconnect_count: int = 0
         self.started_at: datetime = datetime.now(UTC)
 
+        # Order kill-switch (admin/control/pause|resume).
+        # When True, write-side REST endpoints (orders/place|cancel|replace)
+        # return 503 without touching Betfair. Stream + read REST unaffected.
+        self.orders_paused: bool = False
+
         # Counters for /admin/stats.
         self.mcm_count: int = 0
         self.mcm_count_by_event_type: dict[str, int] = {}
@@ -142,6 +147,12 @@ app_state = AppState()
 
 
 def reset_state_for_test() -> None:
-    """Test-only — replace the singleton with a fresh one."""
-    global app_state
-    app_state = AppState()
+    """Test-only — reset the singleton's fields in place.
+
+    Critical: must mutate the *existing* object rather than rebind the
+    module-level name. Other modules import `app_state` by reference;
+    rebinding here wouldn't propagate, and stale flags (e.g.
+    `orders_paused`) would leak between tests.
+    """
+    fresh = AppState()
+    app_state.__dict__.update(fresh.__dict__)

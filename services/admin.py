@@ -173,14 +173,55 @@ async def control(
             at=now,
         )
 
-    if action in {"pause", "resume", "relogin_rest"}:
+    if action == "pause":
+        was = app_state.orders_paused
+        app_state.orders_paused = True
+        app_state.add_activity("orders_paused", "writes rejected with 503")
         return ControlActionResponse(
             action=action,
             accepted=True,
-            executed=False,
-            note=f"{action} — accepted; wires up in Phase 3",
+            executed=not was,
+            note="order placement paused (writes only; reads + stream unaffected)",
             at=now,
         )
+
+    if action == "resume":
+        was = app_state.orders_paused
+        app_state.orders_paused = False
+        app_state.add_activity("orders_resumed", "writes accepted again")
+        return ControlActionResponse(
+            action=action,
+            accepted=True,
+            executed=was,
+            note="order placement resumed",
+            at=now,
+        )
+
+    if action == "relogin_rest":
+        from services.betfair_auth import refresh_session
+        from services.betfair_rest import reset_clients_for_test
+
+        # Force a fresh DELAYED-key certlogin and drop the cached bfl client.
+        try:
+            await refresh_session(key="delayed")
+            reset_clients_for_test()
+            app_state.add_activity("relogin_rest", "DELAYED key re-authenticated")
+            return ControlActionResponse(
+                action=action,
+                accepted=True,
+                executed=True,
+                note="DELAYED key re-authenticated; bfl client reset",
+                at=now,
+            )
+        except Exception as exc:  # noqa: BLE001
+            app_state.add_activity("relogin_rest_failed", repr(exc))
+            return ControlActionResponse(
+                action=action,
+                accepted=True,
+                executed=False,
+                note=f"DELAYED relogin failed: {exc}",
+                at=now,
+            )
 
     # test
     return ControlActionResponse(

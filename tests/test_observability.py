@@ -1,4 +1,6 @@
-"""Phase 2 — observability shell with stream-freshness-aware /ready."""
+"""Phase 3 — observability shell with stream-freshness-aware /ready."""
+
+EXPECTED_PHASE = 3
 
 
 def test_health_returns_ok(client):
@@ -14,7 +16,7 @@ def test_ready_idle_when_session_not_started(client):
     body = r.json()
     assert body["ready"] is True
     assert body["mode"] == "idle"
-    assert body["phase"] == 2
+    assert body["phase"] == EXPECTED_PHASE
 
 
 def test_info_identifies_service(client):
@@ -22,7 +24,7 @@ def test_info_identifies_service(client):
     assert r.status_code == 200
     body = r.json()
     assert body["service"] == "fsu1b"
-    assert body["phase"] == 2
+    assert body["phase"] == EXPECTED_PHASE
     assert "version" in body
 
 
@@ -40,7 +42,7 @@ def test_status_has_uptime_and_now(client):
     assert r.status_code == 200
     body = r.json()
     assert body["service"] == "fsu1b"
-    assert body["phase"] == 2
+    assert body["phase"] == EXPECTED_PHASE
     assert "uptime_s" in body
     assert "now" in body
     assert "stream_status" in body

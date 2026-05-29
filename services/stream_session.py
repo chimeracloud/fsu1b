@@ -166,6 +166,12 @@ class StreamSession:
             backoff = min(backoff * 2, max_b)
 
     async def _keepalive_loop(self) -> None:
+        """Keep both LIVE and DELAYED sessions warm.
+
+        DELAYED is only kept alive if it has been logged in at least
+        once (i.e. someone called a REST endpoint). Until then, the
+        delayed loop simply waits.
+        """
         while self._running:
             settings = get_settings()
             interval = max(60, settings.session_keepalive_hours * 3600)
@@ -177,7 +183,13 @@ class StreamSession:
                 ok = await keepalive(key="live")
                 logger.info("LIVE keepalive: %s", "ok" if ok else "failed")
             except Exception as exc:  # noqa: BLE001
-                logger.warning("keepalive raised: %s", exc)
+                logger.warning("LIVE keepalive raised: %s", exc)
+            if app_state.delayed_session.last_login is not None:
+                try:
+                    ok = await keepalive(key="delayed")
+                    logger.info("DELAYED keepalive: %s", "ok" if ok else "failed")
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("DELAYED keepalive raised: %s", exc)
 
     async def _maintenance_loop(self) -> None:
         while self._running:

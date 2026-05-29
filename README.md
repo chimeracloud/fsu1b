@@ -22,8 +22,8 @@ Full architecture: `audit/reports/FSU1B_Betfair_Gateway_Architecture.md`.
 | Phase | Status | What |
 |---|---|---|
 | 1 — Shell | done | Standard FSU shell, no Betfair |
-| 2 — Stream + all sports | in progress | LIVE key, eventTypeIds 7/1/2, per-sport SSE, watchdog |
-| 3 — REST | pending | DELAYED-key reads + LIVE-key writes |
+| 2 — Stream + all sports | done | LIVE key, eventTypeIds 7/1/2, per-sport SSE, watchdog |
+| 3 — REST | in progress | DELAYED-key reads + LIVE-key writes + DRY_RUN + pause/resume |
 | 4 — Integration | pending | Portal proxy, envelope, manifest, registries |
 | 5 — Testing | pending | 24h soak, DRY_RUN parity, £2 live bet |
 
@@ -69,8 +69,7 @@ pytest -q
 - `PUT /admin/config` — in-memory only (Phase 4 wires GCS persistence)
 - `GET /admin/stats`
 - `GET /admin/activity`
-- `POST /admin/control/{start|stop|reconnect_stream|test}` — wired
-- `POST /admin/control/{pause|resume|relogin_rest}` — accepted, wires up in Phase 3
+- `POST /admin/control/{start|stop|reconnect_stream|pause|resume|relogin_rest|test}` — all wired
 - `GET /admin/events` — SSE (real events in Phase 4)
 
 ### Set 3 — stream + market reads (Phase 2)
@@ -82,6 +81,31 @@ pytest -q
 - `GET /stream/snapshot?sport=&event_type_id=` — full cache JSON for cold-start
 - `GET /markets?sport=&event_type_id=&status=` — summary list
 - `GET /markets/{market_id}` — full market state with runner ladders
+
+### Set 3 — REST reads (Phase 3, DELAYED key)
+
+- `GET /orders/current?market_id=&customer_order_refs=&customer_strategy_refs=&from_record=&record_count=`
+- `GET /orders/cleared?bet_status=&market_id=&settled_from=&settled_to=&from_record=&record_count=`
+- `GET /account/funds?wallet=UK`
+- `GET /account/statement?item_date_from=&item_date_to=&include_item=&from_record=&record_count=`
+- `GET /catalogue/markets?event_type_id=&country=&market_type=&max_results=&sort=&in_play_only=`
+
+### Set 3 — order writes (Phase 3, LIVE key — wagering activity)
+
+- `POST /orders/place` — body: `PlaceOrdersRequest`
+- `POST /orders/cancel` — body: `CancelOrdersRequest`
+- `POST /orders/replace` — body: `ReplaceOrdersRequest`
+
+All write endpoints respect `Settings.dry_run` (PUT /admin/config).
+When `dry_run=true`, no Betfair call is made; the response is
+simulated with `betfair.status=SUCCESS`. Upstream errors are returned
+as 502 with a structured `{ok:false, upstream:'betfair', error, message}`.
+
+### Order kill-switch (Phase 3)
+
+- `POST /admin/control/pause` — write endpoints return 503; reads + stream unaffected
+- `POST /admin/control/resume` — re-enable writes
+- `POST /admin/control/relogin_rest` — force fresh DELAYED-key certlogin
 
 ## Naming
 
