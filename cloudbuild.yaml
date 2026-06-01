@@ -1,0 +1,65 @@
+# Cloud Build pipeline for FSU1B.
+#
+# Used by the GitHub trigger that fires on every push to `main`. The
+# first deploy (DEPLOY.md Step 10) is still manual via `gcloud run
+# deploy --source=.`; from then on every push redeploys automatically.
+#
+# Build → push image → `gcloud run deploy` with the locked flags from
+# DEPLOY.md Step 10. `--update-env-vars=` is intentionally empty so
+# previously-set env vars (notably SERVICE_URL) are preserved.
+#
+# Tag both immutable (:$SHORT_SHA) and floating (:main) so rollbacks
+# work via tag.
+
+substitutions:
+  _REGION: europe-west2
+  _SERVICE: fsu1b
+  _SA: fsu1b-sa@chiops.iam.gserviceaccount.com
+  _IMAGE: europe-west2-docker.pkg.dev/${PROJECT_ID}/cloud-run-source-deploy/fsu1b
+
+steps:
+  - id: build
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - ${_IMAGE}:${SHORT_SHA}
+      - -t
+      - ${_IMAGE}:main
+      - .
+
+  - id: push-sha
+    name: gcr.io/cloud-builders/docker
+    args: [push, "${_IMAGE}:${SHORT_SHA}"]
+
+  - id: push-main
+    name: gcr.io/cloud-builders/docker
+    args: [push, "${_IMAGE}:main"]
+
+  - id: deploy
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - ${_SERVICE}
+      - --image=${_IMAGE}:${SHORT_SHA}
+      - --region=${_REGION}
+      - --project=${PROJECT_ID}
+      - --service-account=${_SA}
+      - --no-allow-unauthenticated
+      - --min-instances=1
+      - --max-instances=1
+      - --cpu=1
+      - --memory=512Mi
+      - --cpu-boost
+      - --no-cpu-throttling
+      - --port=8080
+
+images:
+  - ${_IMAGE}:${SHORT_SHA}
+  - ${_IMAGE}:main
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: E2_HIGHCPU_8
