@@ -118,7 +118,7 @@ as 502 with a structured `{ok:false, upstream:'betfair', error, message}`.
 
 Service-account requirement:
 ```
-fsu1b@chiops.iam.gserviceaccount.com  needs  roles/storage.objectAdmin
+fsu1b-sa@chiops.iam.gserviceaccount.com  needs  roles/storage.objectAdmin
   on bucket  chiops-betfair-recording
 ```
 
@@ -131,7 +131,7 @@ fsu1b@chiops.iam.gserviceaccount.com  needs  roles/storage.objectAdmin
 
 Service-account requirement:
 ```
-fsu1b@chiops.iam.gserviceaccount.com  needs  roles/storage.objectAdmin
+fsu1b-sa@chiops.iam.gserviceaccount.com  needs  roles/storage.objectAdmin
   on bucket  chimera-portal-config
 ```
 
@@ -145,7 +145,7 @@ fsu1b@chiops.iam.gserviceaccount.com  needs  roles/storage.objectAdmin
 
 Service-account requirement:
 ```
-fsu1b@chiops.iam.gserviceaccount.com  needs  roles/pubsub.publisher
+fsu1b-sa@chiops.iam.gserviceaccount.com  needs  roles/pubsub.publisher
   on topic  chimera-fsu1b-events
 ```
 
@@ -177,7 +177,7 @@ When set, GCS config load/save, Source Manifest registration, and Pub/Sub publis
 
 - Repo: `chimeracloud/fsu1b`
 - Cloud Run service: `fsu1b`
-- Service account: `fsu1b@chiops.iam.gserviceaccount.com`
+- Service account: `fsu1b-sa@chiops.iam.gserviceaccount.com`
 - Region: `europe-west2`
 - Config: GCS, portal-editable (no env vars for settings)
 - Credentials: Secret Manager only

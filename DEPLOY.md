@@ -4,7 +4,7 @@
 > Stop at the first failure and resolve before continuing.
 
 **Project / region (locked)**: `chiops` / `europe-west2`
-**Service account (locked)**: `fsu1b@chiops.iam.gserviceaccount.com`
+**Service account (locked)**: `fsu1b-sa@chiops.iam.gserviceaccount.com`
 **Cloud Run service name (locked)**: `fsu1b`
 **Default branch on GitHub at time of deploy**: `main` (after the branch swap in step 9)
 
@@ -37,26 +37,30 @@ Expected: all four listed.
 
 ---
 
-### 0b. Create the FSU1B service account
+### 0b. Verify (or create) the FSU1B service account
 
-The service account is what Cloud Run runs the container as, and what every subsequent IAM grant in this file binds to. If you skipped 0b, every binding step below will fail with `Service account fsu1b@chiops.iam.gserviceaccount.com does not exist`.
+The service account is what Cloud Run runs the container as, and what every subsequent IAM grant in this file binds to. **In the existing `chiops` project the SA already exists** (`fsu1b-sa@chiops`, created when the original FSU1B-stream-recorder was deployed); this step exists as a safety net for fresh projects.
 
+Naming: GCP requires the account ID to be 6–30 chars. `fsu1b` (5 chars) is too short — the convention in this project is the `-sa` suffix, matching `fsu1a-sa`, `fsu1e-sa`, etc.
+
+**Verify it exists:**
 ```bash
-gcloud iam service-accounts create fsu1b \
+gcloud iam service-accounts describe \
+  fsu1b-sa@chiops.iam.gserviceaccount.com --project=chiops \
+  --format="value(email,displayName)"
+```
+
+If verify succeeds, skip to Step 1.
+
+**If it does NOT exist, create it:**
+```bash
+gcloud iam service-accounts create fsu1b-sa \
   --display-name="FSU1B Betfair Exchange Gateway" \
   --description="Owns the LIVE + DELAYED Betfair sessions; runs the fsu1b Cloud Run service" \
   --project=chiops
 ```
 
 Idempotency: existing SA returns `ALREADY_EXISTS`. Safe to ignore.
-
-**Verify:**
-```bash
-gcloud iam service-accounts describe \
-  fsu1b@chiops.iam.gserviceaccount.com --project=chiops \
-  --format="value(email,displayName)"
-```
-Expected: `fsu1b@chiops.iam.gserviceaccount.com  FSU1B Betfair Exchange Gateway`.
 
 ---
 
@@ -82,7 +86,7 @@ Expected: no error (empty listing is fine).
 
 ```bash
 gcloud storage buckets add-iam-policy-binding gs://chimera-portal-config \
-  --member="serviceAccount:fsu1b@chiops.iam.gserviceaccount.com" \
+  --member="serviceAccount:fsu1b-sa@chiops.iam.gserviceaccount.com" \
   --role="roles/storage.objectAdmin"
 ```
 
@@ -91,7 +95,7 @@ gcloud storage buckets add-iam-policy-binding gs://chimera-portal-config \
 gcloud storage buckets get-iam-policy gs://chimera-portal-config \
   --format="value(bindings)" | grep fsu1b
 ```
-Expected: line mentioning `fsu1b@chiops.iam.gserviceaccount.com` and `roles/storage.objectAdmin`.
+Expected: line mentioning `fsu1b-sa@chiops.iam.gserviceaccount.com` and `roles/storage.objectAdmin`.
 
 ---
 
@@ -99,7 +103,7 @@ Expected: line mentioning `fsu1b@chiops.iam.gserviceaccount.com` and `roles/stor
 
 ```bash
 gcloud storage buckets add-iam-policy-binding gs://chiops-betfair-recording \
-  --member="serviceAccount:fsu1b@chiops.iam.gserviceaccount.com" \
+  --member="serviceAccount:fsu1b-sa@chiops.iam.gserviceaccount.com" \
   --role="roles/storage.objectAdmin"
 ```
 
@@ -137,7 +141,7 @@ Expected: `projects/chiops/topics/chimera-fsu1b-events`.
 
 ```bash
 gcloud pubsub topics add-iam-policy-binding chimera-fsu1b-events \
-  --member="serviceAccount:fsu1b@chiops.iam.gserviceaccount.com" \
+  --member="serviceAccount:fsu1b-sa@chiops.iam.gserviceaccount.com" \
   --role="roles/pubsub.publisher" \
   --project=chiops
 ```
@@ -183,7 +187,7 @@ Expected: six `OK` lines. Any `MISSING` blocks the deploy — create the secret 
 for SECRET in betfair-username betfair-password betfair-cert-pem \
               betfair-key-pem betfair-app-key-live betfair-app-key-delayed; do
   gcloud secrets add-iam-policy-binding $SECRET \
-    --member="serviceAccount:fsu1b@chiops.iam.gserviceaccount.com" \
+    --member="serviceAccount:fsu1b-sa@chiops.iam.gserviceaccount.com" \
     --role="roles/secretmanager.secretAccessor" \
     --project=chiops;
 done
@@ -256,7 +260,7 @@ gcloud run deploy fsu1b \
   --source=. \
   --project=chiops \
   --region=europe-west2 \
-  --service-account=fsu1b@chiops.iam.gserviceaccount.com \
+  --service-account=fsu1b-sa@chiops.iam.gserviceaccount.com \
   --no-allow-unauthenticated \
   --min-instances=1 \
   --max-instances=1 \
@@ -446,7 +450,7 @@ The Betfair credentials in Secret Manager are not removed by service deletion. O
 ## Operator checklist (tick as you go)
 
 - [ ] 0a. Required GCP APIs enabled on `chiops`
-- [ ] 0b. Service account `fsu1b@chiops` exists
+- [ ] 0b. Service account `fsu1b-sa@chiops` exists
 - [ ] 1. `gs://chimera-portal-config` exists
 - [ ] 2. FSU1B SA has `objectAdmin` on `chimera-portal-config`
 - [ ] 3. FSU1B SA has `objectAdmin` on `chiops-betfair-recording`
