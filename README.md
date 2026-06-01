@@ -24,8 +24,8 @@ Full architecture: `audit/reports/FSU1B_Betfair_Gateway_Architecture.md`.
 | 1 — Shell | done | Standard FSU shell, no Betfair |
 | 2 — Stream + all sports | done | LIVE key, eventTypeIds 7/1/2, per-sport SSE, watchdog |
 | 3 — REST | done | DELAYED-key reads + LIVE-key writes + DRY_RUN + pause/resume |
-| 4 — Integration | in progress | GCS config + Source Manifest + Pub/Sub envelopes + portal proxy |
-| 5 — Testing | pending | 24h soak, DRY_RUN parity, £2 live bet |
+| 4 — Integration | done | GCS config + Source Manifest + Pub/Sub envelopes + portal proxy |
+| 5 — Testing | docs ready | Operator deploys via `DEPLOY.md`, runs tests, fills `PHASE5_RESULTS.md` |
 
 ## Running locally (Phase 1)
 
