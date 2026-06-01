@@ -59,6 +59,16 @@ class AppState:
         self.mcm_count_by_event_type: dict[str, int] = {}
         self._msg_ts: deque[float] = deque(maxlen=4096)
 
+        # Per-sport last-message timestamps — drives DATA IN LEDs without
+        # frontend dead-reckoning. Keyed by eventTypeId ("7","1","2").
+        self.last_message_at_by_event_type: dict[str, datetime] = {}
+
+        # Per-endpoint last-call timestamps — drives DATA OUT LEDs from
+        # real consumer activity (recorded by the request middleware in
+        # main.py). Keyed by URL path.
+        self.last_call_at_by_endpoint: dict[str, datetime] = {}
+        self.call_count_by_endpoint: dict[str, int] = {}
+
         # Activity ring buffer for /admin/activity.
         self._activity: deque[dict] = deque(maxlen=200)
 
@@ -99,13 +109,22 @@ class AppState:
 
     def note_message(self, event_type_id: Optional[str]) -> None:
         import time as _t
+        now = datetime.now(UTC)
         self.mcm_count += 1
         if event_type_id:
             self.mcm_count_by_event_type[event_type_id] = (
                 self.mcm_count_by_event_type.get(event_type_id, 0) + 1
             )
+            self.last_message_at_by_event_type[event_type_id] = now
         self._msg_ts.append(_t.time())
-        self.last_message_at = datetime.now(UTC)
+        self.last_message_at = now
+
+    def note_endpoint_call(self, path: str) -> None:
+        """Record an inbound HTTP call. Drives OUT-side LEDs."""
+        self.last_call_at_by_endpoint[path] = datetime.now(UTC)
+        self.call_count_by_endpoint[path] = (
+            self.call_count_by_endpoint.get(path, 0) + 1
+        )
 
     def messages_per_s_recent(self, window_s: float = 60.0) -> float:
         import time as _t

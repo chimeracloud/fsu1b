@@ -27,6 +27,9 @@ def test_admin_config_returns_defaults(client):
     assert body["stream_stale_threshold_s"] == 60
     assert body["dry_run"] is False
     assert body["auto_start"] is False
+    assert body["log_level"] == "INFO"
+    assert body["market_hours_start_utc"] == "08:00"
+    assert body["market_hours_end_utc"] == "23:00"
 
 
 def test_admin_config_put_updates_and_persists(client, monkeypatch):
@@ -76,7 +79,7 @@ def test_admin_config_put_returns_502_on_persistence_failure(client, monkeypatch
     apply_dict({"dry_run": False})
 
 
-def test_admin_stats_phase_2_shape(client):
+def test_admin_stats_shape(client):
     r = client.get("/admin/stats")
     assert r.status_code == 200
     body = r.json()
@@ -86,6 +89,58 @@ def test_admin_stats_phase_2_shape(client):
     assert body["reconnect_count"] == 0
     assert body["markets_subscribed"] == 0
     assert "subscribers_by_channel" in body
+    # Phase 4.1: real per-sport + per-endpoint signals.
+    assert "last_message_at_by_sport" in body
+    assert "last_call_at_by_endpoint" in body
+    assert "call_count_by_endpoint" in body
+
+
+def test_admin_stats_records_real_endpoint_calls(client):
+    """Hitting an endpoint must register in stats (no placeholders)."""
+    # Drive some real traffic.
+    client.get("/admin/config")
+    client.get("/admin/status")
+
+    r = client.get("/admin/stats")
+    body = r.json()
+    # The middleware records the path of every non-observability call.
+    assert "/admin/config" in body["last_call_at_by_endpoint"]
+    assert "/admin/status" in body["last_call_at_by_endpoint"]
+    assert body["call_count_by_endpoint"]["/admin/config"] >= 1
+
+
+def test_admin_stats_excludes_observability_paths(client):
+    """Liveness/observability paths must NOT appear in per-endpoint stats."""
+    client.get("/health")
+    client.get("/ready")
+    client.get("/metrics")
+    r = client.get("/admin/stats")
+    body = r.json()
+    for p in ("/health", "/ready", "/metrics", "/info", "/status"):
+        assert p not in body["last_call_at_by_endpoint"], f"{p} should be excluded"
+
+
+def test_admin_stats_last_message_by_sport_after_mcm():
+    """When a market_change arrives, last_message_at_by_sport stamps the sport."""
+    import asyncio
+    from core.state import app_state, reset_state_for_test
+    from services.market_cache import market_cache
+
+    reset_state_for_test()
+
+    async def run():
+        await market_cache.apply_mcm({
+            "mc": [{"id": "1.test", "img": True,
+                     "marketDefinition": {"eventTypeId": "7"}}]
+        })
+        # Simulate what stream_client does when an mcm arrives:
+        app_state.note_message("7")
+
+    asyncio.run(run())
+    assert "7" in app_state.last_message_at_by_event_type
+    assert app_state.last_message_at_by_event_type["7"] is not None
+    asyncio.run(market_cache.reset_for_test())
+    reset_state_for_test()
 
 
 def test_admin_activity_records_boot_events(client):

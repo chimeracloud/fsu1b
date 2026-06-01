@@ -8,7 +8,7 @@ Phase 3.
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 SessionStateLiteral = Literal[
     "not_started",
@@ -57,6 +57,9 @@ class AdminConfigResponse(BaseModel):
     stream_stale_threshold_s: int
     dry_run: bool
     auto_start: bool
+    log_level: str
+    market_hours_start_utc: str
+    market_hours_end_utc: str
 
 
 class AdminConfigUpdate(BaseModel):
@@ -67,12 +70,33 @@ class AdminConfigUpdate(BaseModel):
     stream_stale_threshold_s: int | None = None
     dry_run: bool | None = None
     auto_start: bool | None = None
+    log_level: str | None = None
+    market_hours_start_utc: str | None = None
+    market_hours_end_utc: str | None = None
 
 
 class AdminStatsResponse(BaseModel):
     messages_per_s: float
     mcm_count: int
     mcm_count_by_event_type: dict[str, int]
+    last_message_at_by_sport: dict[str, datetime | None] = Field(
+        default_factory=dict,
+        description=(
+            "Per-sport timestamps driven by real SSE message arrival. Keys "
+            "are sport labels (horse-racing / football / tennis). Null means "
+            "no message has arrived for that sport yet — the GUI shows the "
+            "grey-hollow LED in that case."
+        ),
+    )
+    last_call_at_by_endpoint: dict[str, datetime | None] = Field(
+        default_factory=dict,
+        description=(
+            "Per-endpoint last inbound call timestamp. Drives DATA OUT LEDs "
+            "from real consumer activity. Observability paths "
+            "(/health, /ready, /metrics, /info, /status) are excluded."
+        ),
+    )
+    call_count_by_endpoint: dict[str, int] = Field(default_factory=dict)
     reconnect_count: int
     markets_subscribed: int
     subscribers_by_channel: dict[str, int]

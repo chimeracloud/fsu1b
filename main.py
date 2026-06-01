@@ -22,11 +22,12 @@ import logging
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 
 from core.config import get_settings, replace_settings
 from core.gcs_config import load_config_from_gcs
 from core.logging import configure_logging
+from core.state import app_state
 from core.version import SERVICE_DESCRIPTION, SERVICE_NAME, VERSION
 from services import admin, observability, rest_routes, stream_routes
 from services.event_publisher import publish
@@ -97,6 +98,23 @@ app = FastAPI(
     redoc_url=None,
     lifespan=lifespan,
 )
+
+@app.middleware("http")
+async def _record_endpoint_call(request: Request, call_next):
+    """Stamp every inbound request so DATA OUT LEDs in the portal reflect
+    real consumer activity (not a placeholder).
+
+    Excludes liveness / observability paths so health-pollers don't drown
+    out actual REST traffic in the per-endpoint feed.
+    """
+    path = request.url.path
+    if path not in {"/health", "/ready", "/metrics", "/info", "/status"}:
+        try:
+            app_state.note_endpoint_call(path)
+        except Exception:  # noqa: BLE001 — middleware must never break the request
+            pass
+    return await call_next(request)
+
 
 app.include_router(observability.router)
 app.include_router(admin.router)

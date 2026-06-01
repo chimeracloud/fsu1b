@@ -91,6 +91,9 @@ def get_config() -> AdminConfigResponse:
         stream_stale_threshold_s=s.stream_stale_threshold_s,
         dry_run=s.dry_run,
         auto_start=s.auto_start,
+        log_level=s.log_level,
+        market_hours_start_utc=s.market_hours_start_utc,
+        market_hours_end_utc=s.market_hours_end_utc,
     )
 
 
@@ -129,10 +132,20 @@ def put_config(update: AdminConfigUpdate) -> AdminConfigResponse:
 
 @router.get("/stats", response_model=AdminStatsResponse)
 async def stats() -> AdminStatsResponse:
+    # Translate per-event-type → per-sport label so the GUI can key off
+    # the same names it shows the operator (horse-racing / football / tennis).
+    by_sport: dict[str, object] = {}
+    for et, ts in app_state.last_message_at_by_event_type.items():
+        sport = SPORT_BY_EVENT_TYPE.get(et, et)
+        by_sport[sport] = ts
+
     return AdminStatsResponse(
         messages_per_s=round(app_state.messages_per_s_recent(), 3),
         mcm_count=app_state.mcm_count,
         mcm_count_by_event_type=dict(app_state.mcm_count_by_event_type),
+        last_message_at_by_sport=by_sport,
+        last_call_at_by_endpoint=dict(app_state.last_call_at_by_endpoint),
+        call_count_by_endpoint=dict(app_state.call_count_by_endpoint),
         reconnect_count=app_state.reconnect_count,
         markets_subscribed=await market_cache.count(),
         subscribers_by_channel=app_state.subscriber_count(),

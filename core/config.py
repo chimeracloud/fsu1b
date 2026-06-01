@@ -84,6 +84,7 @@ class Settings:
 
     # Operational flags.
     dry_run: bool = False  # Phase 3: when True, log payload, don't call Betfair.
+    log_level: str = "INFO"  # DEBUG | INFO | WARNING | ERROR — applied on next reload.
 
     # Trading hours (UTC). Stream watchdog suspends out-of-hours.
     market_hours_start_utc: str = "08:00"
