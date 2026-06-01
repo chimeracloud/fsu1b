@@ -12,6 +12,54 @@
 
 ## PRE-DEPLOY — GCP setup
 
+### 0a. Enable required GCP APIs on `chiops`
+
+One-off per project. Idempotent.
+
+```bash
+gcloud services enable \
+  storage.googleapis.com \
+  pubsub.googleapis.com \
+  secretmanager.googleapis.com \
+  run.googleapis.com \
+  cloudbuild.googleapis.com \
+  iam.googleapis.com \
+  --project=chiops
+```
+
+**Verify:**
+```bash
+gcloud services list --enabled --project=chiops \
+  --filter="config.name:(storage.googleapis.com OR pubsub.googleapis.com OR secretmanager.googleapis.com OR run.googleapis.com)" \
+  --format="value(config.name)"
+```
+Expected: all four listed.
+
+---
+
+### 0b. Create the FSU1B service account
+
+The service account is what Cloud Run runs the container as, and what every subsequent IAM grant in this file binds to. If you skipped 0b, every binding step below will fail with `Service account fsu1b@chiops.iam.gserviceaccount.com does not exist`.
+
+```bash
+gcloud iam service-accounts create fsu1b \
+  --display-name="FSU1B Betfair Exchange Gateway" \
+  --description="Owns the LIVE + DELAYED Betfair sessions; runs the fsu1b Cloud Run service" \
+  --project=chiops
+```
+
+Idempotency: existing SA returns `ALREADY_EXISTS`. Safe to ignore.
+
+**Verify:**
+```bash
+gcloud iam service-accounts describe \
+  fsu1b@chiops.iam.gserviceaccount.com --project=chiops \
+  --format="value(email,displayName)"
+```
+Expected: `fsu1b@chiops.iam.gserviceaccount.com  FSU1B Betfair Exchange Gateway`.
+
+---
+
 ### 1. Create the portal-config bucket (if not exists)
 
 ```bash
@@ -397,6 +445,8 @@ The Betfair credentials in Secret Manager are not removed by service deletion. O
 
 ## Operator checklist (tick as you go)
 
+- [ ] 0a. Required GCP APIs enabled on `chiops`
+- [ ] 0b. Service account `fsu1b@chiops` exists
 - [ ] 1. `gs://chimera-portal-config` exists
 - [ ] 2. FSU1B SA has `objectAdmin` on `chimera-portal-config`
 - [ ] 3. FSU1B SA has `objectAdmin` on `chiops-betfair-recording`
