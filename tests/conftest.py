@@ -4,11 +4,22 @@ Shared pytest fixtures.
 The lifespan context manager (in `main.py`) is what populates
 `app.state.settings`. Using `TestClient` as a context manager runs
 that lifespan — so every test gets a fully-initialised app.
-"""
-import pytest
-from fastapi.testclient import TestClient
 
-from main import app
+Test-mode safety: `FSU1B_DISABLE_GCP_IO` is set at module load (before
+any FSU1B module is imported) so the lifespan's GCS/Pub/Sub calls
+short-circuit to in-memory defaults / stub mode. Without this, every
+test would hit real GCP services, slow down 100×, and risk writing to
+production buckets.
+"""
+import os
+
+# CRITICAL: set BEFORE anything imports our modules.
+os.environ.setdefault("FSU1B_DISABLE_GCP_IO", "1")
+
+import pytest  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
+
+from main import app  # noqa: E402
 
 
 @pytest.fixture

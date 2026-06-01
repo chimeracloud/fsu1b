@@ -1,6 +1,6 @@
-"""Phase 3 — observability shell with stream-freshness-aware /ready."""
+"""Phase 4 — observability shell with stream-freshness-aware /ready."""
 
-EXPECTED_PHASE = 3
+EXPECTED_PHASE = 4
 
 
 def test_health_returns_ok(client):

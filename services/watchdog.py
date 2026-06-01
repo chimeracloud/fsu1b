@@ -33,7 +33,17 @@ logger = logging.getLogger(__name__)
 
 
 async def run_watchdog(session) -> None:
-    """Monitor stream freshness. Forces reconnect when stale."""
+    """Monitor stream freshness. Forces reconnect when stale.
+
+    On a stale-trigger, publishes `gateway_stream_stale` (Bible §20)
+    before calling `session.force_disconnect()`. The supervisor's own
+    handler then publishes `gateway_reconnected` once the new TCP
+    connection is established.
+    """
+    # Local import keeps event_publisher off the import graph for tests
+    # that don't need it.
+    from services.event_publisher import publish
+
     while True:
         try:
             settings = get_settings()
@@ -60,6 +70,17 @@ async def run_watchdog(session) -> None:
                 "Watchdog: stream stale (age=%.1fs > threshold=%ds) — forcing reconnect",
                 age, stale,
             )
+            try:
+                await publish(
+                    "gateway_stream_stale",
+                    {
+                        "age_s": round(age, 1),
+                        "threshold_s": stale,
+                        "reconnect_count": app_state.reconnect_count,
+                    },
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("stream_stale publish failed: %s", exc)
             session.force_disconnect(
                 reason=f"stale age={age:.1f}s threshold={stale}s",
             )

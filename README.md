@@ -23,8 +23,8 @@ Full architecture: `audit/reports/FSU1B_Betfair_Gateway_Architecture.md`.
 |---|---|---|
 | 1 — Shell | done | Standard FSU shell, no Betfair |
 | 2 — Stream + all sports | done | LIVE key, eventTypeIds 7/1/2, per-sport SSE, watchdog |
-| 3 — REST | in progress | DELAYED-key reads + LIVE-key writes + DRY_RUN + pause/resume |
-| 4 — Integration | pending | Portal proxy, envelope, manifest, registries |
+| 3 — REST | done | DELAYED-key reads + LIVE-key writes + DRY_RUN + pause/resume |
+| 4 — Integration | in progress | GCS config + Source Manifest + Pub/Sub envelopes + portal proxy |
 | 5 — Testing | pending | 24h soak, DRY_RUN parity, £2 live bet |
 
 ## Running locally (Phase 1)
@@ -106,6 +106,72 @@ as 502 with a structured `{ok:false, upstream:'betfair', error, message}`.
 - `POST /admin/control/pause` — write endpoints return 503; reads + stream unaffected
 - `POST /admin/control/resume` — re-enable writes
 - `POST /admin/control/relogin_rest` — force fresh DELAYED-key certlogin
+
+### Integration (Phase 4)
+
+#### GCS-backed config (CHI-POL-006)
+
+- Bucket: `gs://chiops-betfair-recording/config/fsu1b.json` (configurable via Settings)
+- On startup the gateway hydrates settings from the blob; missing blob → defaults written.
+- `PUT /admin/config` persists immediately. 502 if GCS write fails (in-memory change still applies; retry).
+- GCS unreachable on startup → log warning + use in-memory defaults; service still serves.
+
+Service-account requirement:
+```
+fsu1b@chiops.iam.gserviceaccount.com  needs  roles/storage.objectAdmin
+  on bucket  chiops-betfair-recording
+```
+
+#### Source Manifest (Bible §21)
+
+- Manifest: `gs://chimera-portal-config/source_manifest.json`
+- FSU1B registers itself under the `fsu1b` key on startup (best-effort).
+- `POST /admin/control/reregister_source` forces a retry (e.g. after fixing IAM).
+- The deploy injects `SERVICE_URL` env var; the lifespan propagates it into Settings so the manifest entry advertises the correct Cloud Run URL. (Env vars only carry deploy-time identity — never tunable settings.)
+
+Service-account requirement:
+```
+fsu1b@chiops.iam.gserviceaccount.com  needs  roles/storage.objectAdmin
+  on bucket  chimera-portal-config
+```
+
+#### Event envelope publishing (Bible §20)
+
+- Pub/Sub topic: `chimera-fsu1b-events` (in chiops project; configurable)
+- Envelope: `{envelope:{source,event_type,timestamp,version}, payload:{...}}`
+- Event types: `gateway_started`, `gateway_stopped`, `gateway_session_dropped`, `gateway_session_recovered`, `gateway_stream_stale`, `gateway_reconnected`, `gateway_daily_summary`
+- FSU1B emits **infrastructure** events only. Order business events belong to Live Betting Control (ADR-018).
+- Stub fallback: when Pub/Sub is unavailable, envelopes are logged to stdout and broadcast on `/stream/all` SSE so portal operators still see them.
+
+Service-account requirement:
+```
+fsu1b@chiops.iam.gserviceaccount.com  needs  roles/pubsub.publisher
+  on topic  chimera-fsu1b-events
+```
+
+#### Portal proxy (CHI-ADR-014 / CHI-POL-006)
+
+The browser never talks to FSU1B directly. The CST portal → `cst-api` proxy → FSU1B.
+
+**FSU1B-side requirements (already enforced)**:
+- No CORS middleware. Direct browser requests are not supported.
+- Deployed `--no-allow-unauthenticated` (CHI-POL-004). Cloud Run rejects requests without a valid IAM ID token at the edge.
+- All non-2xx responses carry structured `detail` so the proxy can surface meaningful errors to the operator instead of generic 500s.
+
+**cst-api-side requirements (deployment-time, lives in chimera-portal-api repo)**:
+- Service account `cst-api@chiops.iam.gserviceaccount.com` needs `roles/run.invoker` on the `fsu1b` Cloud Run service.
+- Add `fsu1b` to `PROXY_TARGETS` so the portal can reach `/admin/*`, `/markets`, `/stream/*`, `/orders/*`, `/account/*`, `/catalogue/*` via the proxy.
+
+#### Local development
+
+To run tests / boot the gateway locally without touching real GCP:
+
+```bash
+export FSU1B_DISABLE_GCP_IO=1
+uvicorn main:app --port 8080
+```
+
+When set, GCS config load/save, Source Manifest registration, and Pub/Sub publishing all short-circuit to safe no-ops. Pytest sets it automatically (`tests/conftest.py`).
 
 ## Naming
 

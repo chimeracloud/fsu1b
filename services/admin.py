@@ -25,6 +25,7 @@ from core.config import (
     get_settings,
     replace_settings,
 )
+from core.gcs_config import save_config_to_gcs
 from core.state import app_state
 from core.version import PHASE, SERVICE_NAME, VERSION
 from models.admin import (
@@ -96,16 +97,33 @@ def get_config() -> AdminConfigResponse:
 @router.put("/config", response_model=AdminConfigResponse)
 def put_config(update: AdminConfigUpdate) -> AdminConfigResponse:
     """
-    Update settings (in-memory). Phase 4 wires GCS persistence per
-    CHI-POL-006.
+    Update settings and persist to GCS (CHI-POL-006).
 
     Subscription-filter changes apply on the NEXT stream connection;
     a live subscription cannot be edited mid-flight without
-    resubscribing.
+    resubscribing. dry_run and auto_start take effect immediately.
+    Persistence failures DO NOT roll back the in-memory change —
+    operators should retry the PUT to re-persist. The response carries
+    the applied state so the caller knows what actually took effect.
     """
-    changes = {k: v for k, v in update.model_dump(exclude_unset=True).items() if v is not None}
-    if changes:
-        replace_settings(**changes)
+    changes = {
+        k: v for k, v in update.model_dump(exclude_unset=True).items() if v is not None
+    }
+    if not changes:
+        return get_config()
+
+    persisted = save_config_to_gcs(changes)
+    if not persisted:
+        # Bubble up as 502 — change applied in memory but not persisted.
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "ok": False,
+                "applied_in_memory": True,
+                "persisted_to_gcs": False,
+                "note": "settings changed but did NOT persist to GCS — retry PUT",
+            },
+        )
     return get_config()
 
 
@@ -136,6 +154,7 @@ async def control(
         "resume",
         "reconnect_stream",
         "relogin_rest",
+        "reregister_source",
         "test",
     ],
 ) -> ControlActionResponse:
@@ -196,6 +215,31 @@ async def control(
             note="order placement resumed",
             at=now,
         )
+
+    if action == "reregister_source":
+        from services.source_manifest import register
+
+        try:
+            entry = register()
+            app_state.add_activity(
+                "source_reregistered", f"url={entry.get('url')!r}"
+            )
+            return ControlActionResponse(
+                action=action,
+                accepted=True,
+                executed=True,
+                note=f"manifest entry written (url={entry.get('url')!r})",
+                at=now,
+            )
+        except Exception as exc:  # noqa: BLE001
+            app_state.add_activity("source_reregister_failed", repr(exc))
+            return ControlActionResponse(
+                action=action,
+                accepted=True,
+                executed=False,
+                note=f"manifest registration failed: {exc}",
+                at=now,
+            )
 
     if action == "relogin_rest":
         from services.betfair_auth import refresh_session

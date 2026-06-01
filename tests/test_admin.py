@@ -6,7 +6,7 @@ def test_admin_status_shape(client):
     assert r.status_code == 200
     body = r.json()
     assert body["service"] == "fsu1b"
-    assert body["phase"] == 3
+    assert body["phase"] == 4
     assert body["live_session"]["state"] == "not_started"
     assert body["delayed_session"]["state"] == "not_started"
     assert body["subscriptions"]["market_count"] == 0
@@ -29,13 +29,51 @@ def test_admin_config_returns_defaults(client):
     assert body["auto_start"] is False
 
 
-def test_admin_config_put_updates_in_memory(client):
-    """Phase 2: PUT updates the in-memory settings; GCS persistence is Phase 4."""
+def test_admin_config_put_updates_and_persists(client, monkeypatch):
+    """Phase 4: PUT applies in-memory AND persists to GCS."""
+    # Patch the GCS write helper so we don't try to reach GCS in tests.
+    persisted = []
+
+    def fake_save(payload):
+        # Real helper also calls apply_dict; we mirror that here so the
+        # in-memory change still happens.
+        from core.config import apply_dict
+        apply_dict(payload)
+        persisted.append(payload)
+        return True
+
+    from services import admin as admin_module
+    monkeypatch.setattr(admin_module, "save_config_to_gcs", fake_save)
+
     r = client.put("/admin/config", json={"dry_run": True})
     assert r.status_code == 200
     assert r.json()["dry_run"] is True
+    assert persisted == [{"dry_run": True}]
+
     # Reset for other tests.
     client.put("/admin/config", json={"dry_run": False})
+
+
+def test_admin_config_put_returns_502_on_persistence_failure(client, monkeypatch):
+    def fake_save(payload):
+        from core.config import apply_dict
+        apply_dict(payload)
+        return False  # GCS write failed
+
+    from services import admin as admin_module
+    monkeypatch.setattr(admin_module, "save_config_to_gcs", fake_save)
+
+    r = client.put("/admin/config", json={"dry_run": True})
+    assert r.status_code == 502
+    detail = r.json()["detail"]
+    assert detail["ok"] is False
+    assert detail["applied_in_memory"] is True
+    assert detail["persisted_to_gcs"] is False
+
+    # Reset.
+    monkeypatch.undo()
+    from core.config import apply_dict
+    apply_dict({"dry_run": False})
 
 
 def test_admin_stats_phase_2_shape(client):
@@ -50,12 +88,16 @@ def test_admin_stats_phase_2_shape(client):
     assert "subscribers_by_channel" in body
 
 
-def test_admin_activity_empty_at_boot(client):
+def test_admin_activity_records_boot_events(client):
+    """Phase 4: lifespan publishes gateway_started which writes one activity entry."""
     r = client.get("/admin/activity")
     assert r.status_code == 200
-    # Activity buffer may contain auto-start log if auto_start=True.
-    # With default False, expect empty.
-    assert r.json() == {"events": []}
+    events = r.json()["events"]
+    # Expect at least one entry from the lifespan boot publish.
+    kinds = {e["kind"] for e in events}
+    assert any(k.startswith("event:gateway_") for k in kinds), (
+        f"no infra event in activity feed; kinds={kinds!r}"
+    )
 
 
 def test_admin_control_pause_now_wired(client):

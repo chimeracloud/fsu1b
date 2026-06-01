@@ -30,13 +30,26 @@ import asyncio
 import logging
 from typing import Optional
 
+from datetime import datetime, time as dtime, timedelta, timezone
+
 from core.config import get_settings
 from core.state import app_state
 from services import stream_client
 from services.betfair_auth import keepalive
+from services.event_publisher import publish
 from services.market_cache import market_cache
 
 logger = logging.getLogger(__name__)
+
+UTC = timezone.utc
+
+
+async def _publish_safe(event_type: str, payload: dict | None = None) -> None:
+    """Publish; swallow errors so the supervisor is never derailed by Pub/Sub."""
+    try:
+        await publish(event_type, payload or {})
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("event publish failed (%s): %s", event_type, exc)
 
 
 class StreamSession:
@@ -46,6 +59,16 @@ class StreamSession:
         self._tasks: list[asyncio.Task] = []
         self._current_conn: Optional[asyncio.Task] = None
         self._running = False
+
+        # Lifecycle bookkeeping for event publishing (Bible §20).
+        # `_was_connected` is True after the first successful TCP+auth
+        # cycle of the current session. `_watchdog_drop` is set by
+        # `force_disconnect("watchdog…")` so the next successful
+        # connect publishes `gateway_reconnected` rather than
+        # `gateway_session_recovered`.
+        self._was_connected: bool = False
+        self._watchdog_drop: bool = False
+        self._drop_announced: bool = False  # de-dup gateway_session_dropped
 
     @property
     def is_running(self) -> bool:
@@ -59,6 +82,9 @@ class StreamSession:
         from services.watchdog import run_watchdog
 
         self._running = True
+        self._was_connected = False
+        self._watchdog_drop = False
+        self._drop_announced = False
         app_state.stream_status = "connecting"
         app_state.add_activity("session_start", "starting LIVE stream + workers")
 
@@ -67,6 +93,7 @@ class StreamSession:
             loop.create_task(self._stream_supervisor(), name="bf-supervisor"),
             loop.create_task(self._keepalive_loop(), name="bf-keepalive"),
             loop.create_task(self._maintenance_loop(), name="bf-maintenance"),
+            loop.create_task(self._daily_summary_loop(), name="bf-daily-summary"),
             loop.create_task(run_watchdog(self), name="bf-watchdog"),
         ]
         return {"accepted": True, "detail": "started"}
@@ -89,10 +116,17 @@ class StreamSession:
         return {"accepted": True, "detail": "stopped"}
 
     def force_disconnect(self, reason: str = "") -> None:
-        """Cancel the current TCP connection. Supervisor reconnects with backoff."""
+        """Cancel the current TCP connection. Supervisor reconnects with backoff.
+
+        When called by the watchdog, sets `_watchdog_drop=True` so the
+        next successful (re)connect publishes `gateway_reconnected`
+        instead of `gateway_session_recovered`.
+        """
         if self._current_conn is not None and not self._current_conn.done():
             self._current_conn.cancel()
             app_state.add_activity("force_disconnect", reason or "watchdog")
+            if "watchdog" in (reason or "").lower() or "stale" in (reason or "").lower():
+                self._watchdog_drop = True
 
     def status(self) -> dict:
         settings = get_settings()
@@ -118,7 +152,18 @@ class StreamSession:
     # ── Background loops ─────────────────────────────────────────────────
 
     async def _stream_supervisor(self) -> None:
-        """Run connection attempts forever with exponential backoff."""
+        """Run connection attempts forever with exponential backoff.
+
+        Event-publishing rules:
+          - On a successful connect (stream_status → 'connected') we
+            check the prior state and publish exactly one of:
+              gateway_reconnected         (watchdog-caused drop)
+              gateway_session_recovered   (any other drop)
+              (nothing)                   (this is the FIRST connect)
+          - When the connection fails / is cancelled (other than
+            stop()), we publish gateway_session_dropped exactly once
+            per drop window.
+        """
         backoff = 1
         first = True
 
@@ -136,23 +181,51 @@ class StreamSession:
                 self._current_conn = loop.create_task(
                     stream_client.run_connection(), name="bf-conn",
                 )
-                await self._current_conn
-                # run_connection returning cleanly = shutdown signalled.
+
+                # Observe the moment we actually reach 'connected' so we
+                # can publish the right event. run_connection sets
+                # app_state.stream_status='connected' once the
+                # subscription is acknowledged; spawn a watcher task.
+                watcher = loop.create_task(
+                    self._announce_connected(), name="bf-conn-announce",
+                )
+
+                try:
+                    await self._current_conn
+                finally:
+                    if not watcher.done():
+                        watcher.cancel()
+
                 if not self._running:
                     return
             except asyncio.CancelledError:
-                # Either stop() was called or watchdog cancelled the conn.
                 if not self._running:
                     return
                 logger.info("Stream connection cancelled — will reconnect.")
                 app_state.add_activity("conn_cancelled", "reconnecting")
                 if app_state.stream_status != "disconnected":
                     app_state.stream_status = "reconnecting"
+                if self._was_connected and not self._drop_announced:
+                    await _publish_safe(
+                        "gateway_session_dropped",
+                        {"cause": "cancelled", "reconnect_count": app_state.reconnect_count},
+                    )
+                    self._drop_announced = True
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Stream connection failed: %r", exc)
                 app_state.add_activity("stream_error", repr(exc))
                 if app_state.stream_status != "disconnected":
                     app_state.stream_status = "reconnecting"
+                if self._was_connected and not self._drop_announced:
+                    await _publish_safe(
+                        "gateway_session_dropped",
+                        {
+                            "cause": exc.__class__.__name__,
+                            "message": str(exc),
+                            "reconnect_count": app_state.reconnect_count,
+                        },
+                    )
+                    self._drop_announced = True
             finally:
                 self._current_conn = None
 
@@ -164,6 +237,39 @@ class StreamSession:
                 app_state.stream_status = "disconnected"
                 return
             backoff = min(backoff * 2, max_b)
+
+    async def _announce_connected(self) -> None:
+        """Wait for stream_status='connected', then publish the right event."""
+        # Poll-wait — we're inside the same supervisor task so a small
+        # poll interval is fine (it doesn't load Betfair).
+        try:
+            while self._running:
+                if app_state.stream_status == "connected":
+                    if not self._was_connected:
+                        # First-ever connect for this session — no event.
+                        self._was_connected = True
+                        self._drop_announced = False
+                        return
+                    # This is a reconnect — pick the right event type.
+                    if self._watchdog_drop:
+                        await _publish_safe(
+                            "gateway_reconnected",
+                            {
+                                "trigger": "watchdog",
+                                "reconnect_count": app_state.reconnect_count,
+                            },
+                        )
+                        self._watchdog_drop = False
+                    else:
+                        await _publish_safe(
+                            "gateway_session_recovered",
+                            {"reconnect_count": app_state.reconnect_count},
+                        )
+                    self._drop_announced = False
+                    return
+                await asyncio.sleep(0.5)
+        except asyncio.CancelledError:
+            return
 
     async def _keepalive_loop(self) -> None:
         """Keep both LIVE and DELAYED sessions warm.
@@ -206,6 +312,37 @@ class StreamSession:
                     )
             except Exception as exc:  # noqa: BLE001
                 logger.warning("maintenance raised: %s", exc)
+
+    async def _daily_summary_loop(self) -> None:
+        """Fire `gateway_daily_summary` at the start of each UTC day.
+
+        Sleeps until the next 00:00 UTC, fires the summary for the day
+        that just ended, then resets per-day counters.
+        """
+        while self._running:
+            now = datetime.now(UTC)
+            tomorrow = (now + timedelta(days=1)).date()
+            next_tick = datetime.combine(tomorrow, dtime.min, tzinfo=UTC)
+            wait_s = max(60, int((next_tick - now).total_seconds()))
+            try:
+                await asyncio.sleep(wait_s)
+            except asyncio.CancelledError:
+                return
+
+            await _publish_safe(
+                "gateway_daily_summary",
+                {
+                    "for_date": (next_tick - timedelta(days=1)).date().isoformat(),
+                    "mcm_count": app_state.mcm_count,
+                    "mcm_count_by_event_type": dict(app_state.mcm_count_by_event_type),
+                    "reconnect_count": app_state.reconnect_count,
+                    "markets_in_cache": await market_cache.count(),
+                },
+            )
+            # Reset per-day counters.
+            app_state.mcm_count = 0
+            app_state.mcm_count_by_event_type.clear()
+            app_state.reconnect_count = 0
 
 
 # Module-level singleton.

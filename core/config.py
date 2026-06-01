@@ -1,10 +1,9 @@
 """
 Configuration.
 
-Phase 2: in-memory dataclass with mutable runtime state behind a
-get/replace API. Phase 4 will back this onto GCS per CHI-POL-006
-(portal-editable, no env vars for settings). Credentials never live
-here — Secret Manager only (CHI-POL-003).
+Phase 2: in-memory dataclass behind a get/replace API.
+Phase 4: backed by GCS via `core.gcs_config` per CHI-POL-006.
+        Credentials never live here — Secret Manager only (CHI-POL-003).
 
 Sport-id mapping (Betfair eventTypeId → Chimera sport label):
   "7" → horse-racing
@@ -13,8 +12,9 @@ Sport-id mapping (Betfair eventTypeId → Chimera sport label):
 
 SC go-ahead Phase 2 subscribes to all three from day one.
 """
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, fields, replace
 from threading import RLock
+from typing import Any
 
 
 # Public mapping — used by stream routing and admin display.
@@ -85,6 +85,24 @@ class Settings:
     # Operational flags.
     dry_run: bool = False  # Phase 3: when True, log payload, don't call Betfair.
 
+    # Trading hours (UTC). Stream watchdog suspends out-of-hours.
+    market_hours_start_utc: str = "08:00"
+    market_hours_end_utc: str = "23:00"
+
+    # Public URL for Source Manifest registration. Populated at deploy
+    # time (e.g. from $SERVICE_URL); if empty, the manifest entry is
+    # still written but with "url": "".
+    service_url: str = ""
+
+    # GCS buckets (Phase 4).
+    config_bucket: str = "chiops-betfair-recording"
+    config_blob: str = "config/fsu1b.json"
+    manifest_bucket: str = "chimera-portal-config"
+    manifest_blob: str = "source_manifest.json"
+
+    # Pub/Sub topic for envelope publishing (Bible §20).
+    events_topic: str = "chimera-fsu1b-events"
+
     # Secret Manager refs.
     secrets: SecretRefs = field(default_factory=SecretRefs)
 
@@ -114,3 +132,44 @@ def reset_settings_for_test() -> None:
     global _current
     with _lock:
         _current = Settings()
+
+
+def settings_to_dict() -> dict[str, Any]:
+    """Serialise current settings to a JSON-safe dict (for GCS persistence)."""
+    with _lock:
+        d = asdict(_current)
+    # Tuples → lists for JSON.
+    for k, v in list(d.items()):
+        if isinstance(v, tuple):
+            d[k] = list(v)
+    return d
+
+
+def apply_dict(payload: dict[str, Any]) -> Settings:
+    """Hydrate settings from a (possibly partial) dict.
+
+    Unknown keys are ignored. Tuple-typed fields accept lists too.
+    `secrets` may be a nested dict — fields fall through to SecretRefs.
+    """
+    global _current
+    with _lock:
+        allowed = {f.name for f in fields(Settings)}
+        secrets_allowed = {f.name for f in fields(SecretRefs)}
+
+        changes: dict[str, Any] = {}
+        for k, v in payload.items():
+            if k not in allowed:
+                continue
+            if k == "secrets" and isinstance(v, dict):
+                sr_changes = {kk: vv for kk, vv in v.items() if kk in secrets_allowed}
+                changes["secrets"] = replace(_current.secrets, **sr_changes)
+                continue
+            # Tuple fields — coerce lists.
+            current_value = getattr(_current, k)
+            if isinstance(current_value, tuple) and isinstance(v, list):
+                changes[k] = tuple(v)
+            else:
+                changes[k] = v
+
+        _current = replace(_current, **changes)
+        return _current
