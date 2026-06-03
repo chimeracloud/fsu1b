@@ -25,7 +25,8 @@ Full architecture: `audit/reports/FSU1B_Betfair_Gateway_Architecture.md`.
 | 2 — Stream + all sports | done | LIVE key, eventTypeIds 7/1/2, per-sport SSE, watchdog |
 | 3 — REST | done | DELAYED-key reads + LIVE-key writes + DRY_RUN + pause/resume |
 | 4 — Integration | done | GCS config + Source Manifest + Pub/Sub envelopes + portal proxy |
-| 5 — Testing | docs ready | Operator deploys via `DEPLOY.md`, runs tests, fills `PHASE5_RESULTS.md` |
+| 4.1 — Real signals | done | `last_message_at_by_sport` + `last_call_at_by_endpoint` in `/admin/stats`; `log_level` + `market_hours_*` in `/admin/config` |
+| 5 — Testing | T1–T5 + T8 PASS | T6 (real £2) + T7 (24h soak) pending operator. Results in `PHASE5_RESULTS.md` |
 
 ## Running locally (Phase 1)
 
@@ -65,9 +66,9 @@ pytest -q
 ### Set 1 — admin (CHI-ADR-010)
 
 - `GET /admin/status` — real LIVE-session + stream state + subscription counts
-- `GET /admin/config`
-- `PUT /admin/config` — in-memory only (Phase 4 wires GCS persistence)
-- `GET /admin/stats`
+- `GET /admin/config` — incl. `log_level`, `market_hours_start_utc`, `market_hours_end_utc`
+- `PUT /admin/config` — persists to GCS; 502 if persistence fails (in-memory change still applies, retry)
+- `GET /admin/stats` — incl. `last_message_at_by_sport`, `last_call_at_by_endpoint`, `call_count_by_endpoint`
 - `GET /admin/activity`
 - `POST /admin/control/{start|stop|reconnect_stream|pause|resume|relogin_rest|test}` — all wired
 - `GET /admin/events` — SSE (real events in Phase 4)
