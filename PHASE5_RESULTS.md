@@ -605,3 +605,388 @@ _did the restart preserve the LIVE / DELAYED sessions? (it shouldn't — Cloud R
 ---
 
 *Born from complexity. Engineered for certainty.*
+
+---
+---
+
+# Phase 5 completion pack — 2026-09-03
+
+Prepared by Claude. **T6 is prepared, not run.** T7 is a method
+proposal. Neither has been executed.
+
+## Findings that change how T6 and T7 must be run
+
+Three things were true of the deployed service on 2026-09-03 that were
+not true when T1–T8 were recorded on 2026-06-03. All three affect the
+validity of a soak.
+
+1. **`auto_start` was `true` in GCS.** The dataclass default is
+   `False`, but settings hydrate from
+   `gs://chiops-betfair-recording/config/fsu1b.json`, which overrode
+   it. The gateway had self-started on the LIVE key at
+   `08:17:57Z` that morning with no operator action. Set back to
+   `false` and the stream stopped at `09:02:53Z`.
+
+2. **The Cloud Build trigger never used `cloudbuild.yaml`.** It ran an
+   auto-generated inline build whose deploy step was `gcloud run
+   services update --image --labels`. The service therefore ran with
+   `min-instances=0`, `max-instances=20`, CPU throttling on — none of
+   the repo's locked flags. Trigger repointed at `cloudbuild.yaml`.
+
+3. **`max-instances=20` combined with `auto_start=true` meant FSU1B
+   could collide with itself.** Any scale-out boots another container,
+   which reads `auto_start: true` and opens its own LIVE-key session.
+
+**A soak run before the corrected flags are deployed proves nothing** —
+with `min-instances=0` the container can be reclaimed mid-soak, and the
+stream would die without a drop event ever being published.
+
+---
+
+## T6 — Real £2 bet · PREPARED, NOT RUN
+
+**Runs on the LIVE key. Charles executes. Do not automate.**
+
+### Preconditions
+
+| # | Check | Required |
+|---|---|---|
+| 1 | Corrected flags deployed | `min-instances=1`, `max-instances=1` on the serving revision |
+| 2 | `fsu100-track1` not trading | LIVE-key stream collision otherwise |
+| 3 | Stream started deliberately | `POST /admin/control/start`, then `/admin/status.stream.stream_status == "connected"` |
+| 4 | **`dry_run` is `false`** | It is currently **`true`** in GCS — T5 restored it in memory but the blob still reads `true` |
+| 5 | Orders not paused | `/admin/status` after `POST /admin/control/resume` if unsure |
+| 6 | Eyes on Betfair web UI | Independent confirmation the bet is real |
+
+### Step 0 — environment
+
+```bash
+TOKEN=$(gcloud auth print-identity-token)
+SERVICE_URL=$(gcloud run services describe fsu1b \
+  --region=europe-west2 --project=chiops --format='value(status.url)')
+```
+
+### Step 1 — take dry_run off (this is the live-money switch)
+
+```bash
+curl -s -X PUT -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"dry_run": false}' "$SERVICE_URL/admin/config" | jq .dry_run
+```
+Expect `false`. Confirm it persisted:
+```bash
+gcloud storage cat gs://chiops-betfair-recording/config/fsu1b.json | jq .dry_run
+```
+
+### Step 2 — pick a deep-liquidity runner
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" \
+  "$SERVICE_URL/markets?sport=horse-racing&status=OPEN" | jq '.markets[:5]'
+
+MARKET_ID="1.xxxxxxxxx"
+curl -s -H "Authorization: Bearer $TOKEN" \
+  "$SERVICE_URL/markets/$MARKET_ID" | jq '.runners[] | {selection_id, status, ltp, batl}'
+```
+
+Choose a runner whose **best lay price is 4.0 or longer**, and lay at a
+price **well above** the best available so the order rests unmatched on
+the book. Laying £2 at a long price is the smallest real liability the
+test can carry; the point is to prove the order round-trips, not to
+trade.
+
+> **Liability warning.** A LAY at price *P* for £2 risks **£2 × (P − 1)**
+> if it matches and loses. At 5.0 that is **£8**. Price it to rest, and
+> cancel promptly.
+
+### Step 3 — place
+
+```bash
+REF="t6-$(date +%s)"
+curl -s -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d "{
+    \"market_id\": \"$MARKET_ID\",
+    \"instructions\": [{
+      \"selection_id\": $SELECTION_ID,
+      \"side\": \"LAY\",
+      \"order_type\": \"LIMIT\",
+      \"limit_order\": {\"size\": 2.0, \"price\": $PRICE, \"persistence_type\": \"LAPSE\"},
+      \"customer_order_ref\": \"$REF\"
+    }],
+    \"customer_ref\": \"$REF\",
+    \"customer_strategy_ref\": \"phase5-t6\"
+  }" \
+  "$SERVICE_URL/orders/place" | jq .
+```
+
+**Expected**
+```json
+{
+  "ok": true,
+  "dry_run": false,
+  "latency_ms": <non-zero>,
+  "betfair": {
+    "status": "SUCCESS",
+    "instructionReports": [
+      { "status": "SUCCESS", "betId": "<numeric>", "orderStatus": "EXECUTABLE",
+        "sizeMatched": 0.0, "averagePriceMatched": 0.0 }
+    ]
+  }
+}
+```
+
+**The three assertions that make this test meaningful:**
+- `dry_run` is `false` — not the simulator
+- `betId` is numeric and does **not** start with `DRY-`
+- `latency_ms` is non-zero — T5's simulator returned `0.0`
+
+### Step 4 — verify independently
+
+```bash
+BET_ID="<from instructionReports[0].betId>"
+curl -s -H "Authorization: Bearer $TOKEN" \
+  "$SERVICE_URL/orders/current?market_id=$MARKET_ID" | jq '.betfair'
+curl -s -H "Authorization: Bearer $TOKEN" "$SERVICE_URL/account/funds" | jq .
+```
+The order must appear with the same `betId`, and `exposure` must move
+by the liability. **Also confirm the bet on the Betfair web UI** — this
+is the only check independent of FSU1B's own code path.
+
+> `/orders/current` and `/account/funds` are **DELAYED**-key reads while
+> the bet was placed on the **LIVE** key. Seeing the LIVE-key order
+> through a DELAYED-key read is itself a proof the two-key split is
+> wired correctly. Allow for the delayed key's data lag — retry once
+> after ~30s before treating an absent order as a failure.
+
+### Step 5 — cancel
+
+```bash
+curl -s -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d "{
+    \"market_id\": \"$MARKET_ID\",
+    \"instructions\": [{\"bet_id\": \"$BET_ID\"}],
+    \"customer_ref\": \"t6-cancel-$(date +%s)\"
+  }" \
+  "$SERVICE_URL/orders/cancel" | jq .
+
+curl -s -H "Authorization: Bearer $TOKEN" \
+  "$SERVICE_URL/orders/current?market_id=$MARKET_ID" | jq '.betfair'
+curl -s -H "Authorization: Bearer $TOKEN" "$SERVICE_URL/account/funds" | jq .
+```
+
+Expect `status: SUCCESS`, `sizeCancelled: 2.0`, no unmatched remainder,
+and funds back to the pre-bet figure.
+
+### Step 6 — restore
+
+```bash
+curl -s -X PUT -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"dry_run": true}' "$SERVICE_URL/admin/config" | jq .dry_run
+```
+
+Decide deliberately whether `dry_run` should end `true` or `false`.
+It is `true` in GCS today, which means **order writes are simulated**.
+FSU1B cannot place real orders for any downstream engine until it is
+`false`.
+
+### If it partially matches
+
+Cancel removes only the unmatched remainder. A matched portion is real
+exposure and stays until settlement. That is not an FSU1B failure —
+settlement is FSU2B's job. Record the matched size and let it settle.
+
+### Rollback
+
+`POST /admin/control/pause` rejects all writes with 503 immediately,
+leaving reads and the stream untouched. Use it if anything looks wrong
+mid-test.
+
+### Result
+
+```
+Approved by Charles at: _________________________________________________
+Run at (UTC):           _________________________________________________
+betId:                  _________________________________________________
+Matched before cancel:  _________________________________________________
+Status:                 PASS / FAIL
+```
+
+---
+
+## T7 — 24-hour soak · METHOD PROPOSAL
+
+### Do not start until
+
+`min-instances=1` and `max-instances=1` are on the serving revision.
+Confirm:
+```bash
+gcloud run services describe fsu1b --project chiops --region europe-west2 \
+  --format="value(spec.template.metadata.annotations['autoscaling.knative.dev/minScale'],
+                  spec.template.metadata.annotations['autoscaling.knative.dev/maxScale'],
+                  spec.template.metadata.annotations['run.googleapis.com/cpu-throttling'])"
+```
+Expect `1  1  false`. A soak on `0 / 20 / throttled` measures nothing.
+
+### Sampling
+
+Every 30 minutes for 24h, capture `/ready` (status code), and from
+`/admin/status`: `stream.stream_status`, `stream.reconnect_count`,
+`stream.mcm_count`, `stream.messages_per_s_recent`,
+`subscriptions.market_count`, `subscriptions.pct_of_limit`.
+
+30 minutes rather than the scaffold's 4 hours: the container's memory
+and the reconnect count are the things under test, and a 4-hour gap
+cannot distinguish one drop from twenty.
+
+```bash
+SERVICE_URL=$(gcloud run services describe fsu1b --region=europe-west2 \
+  --project=chiops --format='value(status.url)')
+OUT=~/fsu1b-soak-$(date +%Y%m%d).ndjson
+
+while true; do
+  TOKEN=$(gcloud auth print-identity-token)   # refresh each pass; it expires
+  CODE=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "$SERVICE_URL/ready")
+  curl -s -H "Authorization: Bearer $TOKEN" "$SERVICE_URL/admin/status" \
+    | jq -c --arg ready "$CODE" --arg ts "$(date -u +%FT%TZ)" '{
+        ts: $ts, ready: $ready,
+        status: .stream.stream_status,
+        reconnects: .stream.reconnect_count,
+        mcm: .stream.mcm_count,
+        rate: .stream.messages_per_s_recent,
+        markets: .subscriptions.market_count,
+        pct_limit: .subscriptions.pct_of_limit
+      }' >> "$OUT"
+  sleep 1800
+done
+```
+
+Memory is the one thing the endpoints cannot self-report — take it from
+Cloud Monitoring (`run.googleapis.com/container/memory/utilizations`)
+rather than trusting the service's own view.
+
+### Inducing a disconnection — proving the watchdog, not the supervisor
+
+The June T4 test exercised `POST /admin/control/reconnect_stream`.
+That proves the **supervisor** reconnects, but it deliberately cancels
+the connection, so it never exercises the **watchdog**, which triggers
+on *silence* rather than on cancellation. The two are different code
+paths and T4 only covered one. The scaffold's option (c) — dropping
+`stream_stale_threshold_s` to 5s — was tried in June and could not
+trip, because mcms arrive sub-second during trading and the age never
+reached 5s.
+
+**The watchdog only fires when `stream_age_s` exceeds the threshold
+while `stream_status == "connected"`.** To create that condition
+honestly, run the test **out of hours** — after the last UK race, with
+the filter on horse racing, real message flow stops while the TCP
+connection stays open. Then:
+
+```bash
+# Out of hours, with the stream still 'connected':
+curl -s -H "Authorization: Bearer $TOKEN" "$SERVICE_URL/admin/status" \
+  | jq '{status: .stream.stream_status, age: .stream.stream_age_s}'
+# age should now be climbing into the tens of seconds
+
+# Watch for the watchdog at 60s:
+for i in $(seq 1 10); do
+  sleep 15
+  curl -s -H "Authorization: Bearer $TOKEN" "$SERVICE_URL/admin/activity" \
+    | jq -c '.events[-3:]'
+done
+```
+
+**Expected sequence** — this is the pass condition:
+```
+event:gateway_stream_stale      {"age_s": >60, "threshold_s": 60}
+force_disconnect                stale age=...
+conn_cancelled                  reconnecting
+event:gateway_session_dropped   {"cause":"cancelled"}
+stream_connecting               stream-api.betfair.com:443
+stream_subscribed               ...
+event:gateway_reconnected       {"trigger":"watchdog"}
+```
+
+`trigger: "watchdog"` is the discriminator. `gateway_session_recovered`
+instead of `gateway_reconnected` means the supervisor recovered but the
+watchdog was not the cause — that is a T4 result, not a T7 one.
+
+### Verifying `/ready` is honest — run this separately from the soak
+
+The claim under test: **a gateway that reports ready while holding a
+dead stream is worse than one that reports unready.** Test it directly
+rather than hoping the soak catches it.
+
+```bash
+# 1. Stream running and fresh:
+curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $TOKEN" "$SERVICE_URL/ready"
+#    expect 200, mode "running"
+
+# 2. Make the stream stale without stopping the session — drop the
+#    threshold below the real inter-message gap:
+curl -s -X PUT -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"stream_stale_threshold_s": 1, "stream_check_interval_s": 3600}' \
+  "$SERVICE_URL/admin/config" | jq .
+```
+
+Setting `stream_check_interval_s` high is the trick that makes this
+work: it parks the watchdog for an hour so it cannot reconnect the
+stream out from under the test, while `/ready` still evaluates
+freshness against the 1s threshold on every request. That isolates the
+readiness logic from the recovery logic.
+
+```bash
+# 3. /ready must now fail while the session is still running:
+curl -s -w '\nHTTP %{http_code}\n' -H "Authorization: Bearer $TOKEN" "$SERVICE_URL/ready"
+#    expect HTTP 503, {"ready": false, "mode": "running", ...}
+
+# 4. RESTORE — do not leave the watchdog parked:
+curl -s -X PUT -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"stream_stale_threshold_s": 60, "stream_check_interval_s": 30}' \
+  "$SERVICE_URL/admin/config" | jq .
+```
+
+A 200 at step 3 is a **hard fail** — it means the gateway would keep
+receiving proxied traffic while blind.
+
+### Pass criteria
+
+| Criterion | Threshold |
+|---|---|
+| Unrecovered drops | **Zero.** Every `gateway_session_dropped` paired with a `recovered`/`reconnected` |
+| `reconnect_count` | < 5 over 24h |
+| `/ready` | 200 at every sample during trading hours |
+| `/ready` honesty | 503 at step 3 above — **hard fail if 200** |
+| Watchdog | One `gateway_reconnected` with `trigger: "watchdog"` |
+| Memory | Flat. A monotonic rise over 24h is a fail even if nothing drops |
+| `messages_per_s` | Non-zero during trading hours; zero out of hours is expected |
+| `gateway_daily_summary` | Fires at 00:00 UTC |
+| Instance count | Stays at 1 for the whole soak |
+
+### Known defect that will distort the soak
+
+`StreamSession._stream_supervisor` initialises `backoff = 1` once, then
+doubles it on **every** loop iteration and never resets it after a
+successful connection (`services/stream_session.py:167`, `:239`). The
+backoff is therefore a function of how many times the session has *ever*
+reconnected, not of how badly the current reconnect is going. After
+about nine reconnects it pins at `reconnect_max_backoff_s` (300s), so a
+drop late in a 24-hour soak costs five minutes of downtime where the
+first drop cost one second.
+
+This has not been changed — it is outside the brief's scope and the
+code is working as written. Flagged because it will show up as
+increasing recovery times across the soak and should not be
+misread as degradation. The fix is to reset `backoff = 1` after a
+connection that stayed up.
+
+### Result
+
+```
+Started (UTC):   _________________________________________________
+Ended (UTC):     _________________________________________________
+Reconnects:      _________________________________________________
+Unrecovered:     _________________________________________________
+Watchdog fired:  _________________________________________________
+/ready honest:   _________________________________________________
+Memory flat:     _________________________________________________
+Status:          PASS / FAIL
+```

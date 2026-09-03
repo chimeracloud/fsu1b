@@ -47,6 +47,7 @@ from core.secrets import get_credentials
 from core.state import app_state
 from services.betfair_auth import get_session_token, refresh_session
 from services.market_cache import market_cache
+from services import subscription_guard
 
 logger = logging.getLogger(__name__)
 UTC = timezone.utc
@@ -198,6 +199,12 @@ async def _handle_mcm(msg: dict) -> None:
     # Apply deltas; collect touched markets.
     touched = await market_cache.apply_mcm(msg) if msg.get("mc") else []
 
+    # Warn well before Betfair's subscription ceiling. `due()` gates on
+    # the guard's throttle first, so a busy stream doesn't re-lock the
+    # cache to count it on every single message.
+    if touched and subscription_guard.due():
+        await subscription_guard.check(await market_cache.count())
+
     # Update segmentation cursor only on non-segmented / SEG_END.
     seg = msg.get("segmentType")
     if seg is None or seg == "SEG_END":
@@ -239,6 +246,8 @@ def _handle_status_msg(msg: dict) -> None:
         return
     logger.error("Stream status error: %s — %s", err, msg.get("errorMessage"))
     app_state.add_activity("stream_status_error", str(msg))
+    if err == "SUBSCRIPTION_LIMIT_EXCEEDED":
+        _note_subscription_limit_exceeded()
     # Auth-class errors must force a fresh certlogin on next reconnect.
     if err in ("INVALID_SESSION_INFORMATION", "MAX_CONNECTION_LIMIT_EXCEEDED", "NOT_AUTHORIZED"):
         _stores_drop_token()
@@ -289,7 +298,31 @@ async def _message_stream(
             logger.warning("malformed stream message: %s — raw=%r", exc, text[:200])
 
 
+def _note_subscription_limit_exceeded() -> None:
+    """Make the ceiling loud.
+
+    Reconnecting with the same filter reproduces this error every time,
+    so the supervisor would otherwise sit in a silent backoff loop that
+    escalates to `reconnect_max_backoff_s`. The operator needs to know
+    the filter is the cause, not the network.
+    """
+    settings = get_settings()
+    detail = (
+        f"Betfair rejected the subscription: SUBSCRIPTION_LIMIT_EXCEEDED. "
+        f"configured subscription_limit={settings.subscription_limit}; "
+        f"filter event_type_ids={list(settings.event_type_ids)} "
+        f"market_types={list(settings.market_types)} "
+        f"countries={list(settings.countries)}. "
+        f"Reconnecting with this filter will fail identically — narrow the "
+        f"filter via PUT /admin/config."
+    )
+    logger.error(detail)
+    app_state.add_activity("subscription_limit_exceeded", detail)
+
+
 def _check_status(msg: dict, context: str) -> None:
+    if msg.get("errorCode") == "SUBSCRIPTION_LIMIT_EXCEEDED":
+        _note_subscription_limit_exceeded()
     if msg.get("statusCode") != "SUCCESS":
         raise RuntimeError(
             f"{context} failed: statusCode={msg.get('statusCode')} "

@@ -26,3 +26,17 @@ from main import app  # noqa: E402
 def client():
     with TestClient(app) as c:
         yield c
+
+
+@pytest.fixture(autouse=True)
+def _reset_subscription_guard():
+    """The guard latches its warning and throttles by wall clock.
+
+    Both are module-level, so without a reset one test's warning would
+    suppress the next test's.
+    """
+    from services import subscription_guard
+
+    subscription_guard.reset_for_test()
+    yield
+    subscription_guard.reset_for_test()

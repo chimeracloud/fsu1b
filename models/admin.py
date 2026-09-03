@@ -31,11 +31,32 @@ class SessionState(BaseModel):
 
 
 class SubscriptionsSummary(BaseModel):
-    market_count: int = 0
+    market_count: int = Field(
+        default=0,
+        description=(
+            "Live count of markets this subscription is carrying. Proxied "
+            "from the market cache; may briefly overstate, because CLOSED "
+            "markets stay cached until the 300s maintenance sweep."
+        ),
+    )
     by_sport: dict[str, int] = Field(
         default_factory=dict,
         description="Active-market count keyed by sport label.",
     )
+    limit: int = Field(
+        default=0,
+        description=(
+            "Configured Betfair subscription ceiling (Settings."
+            "subscription_limit). Chimera's allocation is 1,000 markets "
+            "per session as of 2026-06-08."
+        ),
+    )
+    warn_at: int = Field(
+        default=0,
+        description="Market count at which the gateway warns (limit x warn_pct).",
+    )
+    pct_of_limit: float = 0.0
+    at_warning_level: bool = False
 
 
 class AdminStatusResponse(BaseModel):
@@ -55,6 +76,8 @@ class AdminConfigResponse(BaseModel):
     market_types: list[str]
     stream_check_interval_s: int
     stream_stale_threshold_s: int
+    subscription_limit: int
+    subscription_warn_pct: float
     dry_run: bool
     auto_start: bool
     log_level: str
@@ -68,6 +91,8 @@ class AdminConfigUpdate(BaseModel):
     market_types: list[str] | None = None
     stream_check_interval_s: int | None = None
     stream_stale_threshold_s: int | None = None
+    subscription_limit: int | None = None
+    subscription_warn_pct: float | None = None
     dry_run: bool | None = None
     auto_start: bool | None = None
     log_level: str | None = None

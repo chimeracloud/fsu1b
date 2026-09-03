@@ -27,6 +27,35 @@ Full architecture: `audit/reports/FSU1B_Betfair_Gateway_Architecture.md`.
 | 4 — Integration | done | GCS config + Source Manifest + Pub/Sub envelopes + portal proxy |
 | 4.1 — Real signals | done | `last_message_at_by_sport` + `last_call_at_by_endpoint` in `/admin/stats`; `log_level` + `market_hours_*` in `/admin/config` |
 | 5 — Testing | T1–T5 + T8 PASS | T6 (real £2) + T7 (24h soak) pending operator. Results in `PHASE5_RESULTS.md` |
+| 5.1 — Subscription limit | done | 200 → 1,000 as a GCS-persisted setting, live count exposed, 90% warning |
+
+## Deployment
+
+CI/CD is **push to `main` → Cloud Build → Cloud Run**, driven by
+`cloudbuild.yaml`.
+
+> **2026-09-03 — the trigger did not use `cloudbuild.yaml` until this
+> date.** It carried an auto-generated inline build (created
+> 2026-06-01, before `cloudbuild.yaml` was committed) whose deploy step
+> was `gcloud run services update --image --labels`. That updates the
+> image and nothing else, so none of the flags below had ever been
+> applied. The service ran with `min-instances=0`, `max-instances=20`
+> and CPU throttling on.
+
+The scaling flags are **load-bearing, not tuning**:
+
+| Flag | Why |
+|---|---|
+| `--min-instances=1` | At 0, Cloud Run scales to zero and silently kills the stream |
+| `--max-instances=1` | Above 1, each extra instance boots and can hold its **own** LIVE-key Betfair session — the exact collision FSU1B exists to prevent |
+| `--no-cpu-throttling` | Background asyncio tasks (stream reader, watchdog, keepalive) must run between requests |
+| `--no-allow-unauthenticated` | CHI-POL-004 |
+
+`auto_start` is `false` and must stay so: the gateway boots stopped and
+is started deliberately with `POST /admin/control/start`. Because
+settings are hydrated from GCS, the value that governs a cold start is
+the one in `gs://chiops-betfair-recording/config/fsu1b.json`, not the
+dataclass default.
 
 ## Running locally (Phase 1)
 
@@ -66,7 +95,9 @@ pytest -q
 ### Set 1 — admin (CHI-ADR-010)
 
 - `GET /admin/status` — real LIVE-session + stream state + subscription counts
-- `GET /admin/config` — incl. `log_level`, `market_hours_start_utc`, `market_hours_end_utc`
+  (incl. `subscriptions.limit`, `warn_at`, `pct_of_limit`, `at_warning_level`)
+- `GET /admin/config` — incl. `log_level`, `market_hours_start_utc`,
+  `market_hours_end_utc`, `subscription_limit`, `subscription_warn_pct`
 - `PUT /admin/config` — persists to GCS; 502 if persistence fails (in-memory change still applies, retry)
 - `GET /admin/stats` — incl. `last_message_at_by_sport`, `last_call_at_by_endpoint`, `call_count_by_endpoint`
 - `GET /admin/activity`
@@ -149,6 +180,47 @@ Service-account requirement:
 fsu1b-sa@chiops.iam.gserviceaccount.com  needs  roles/pubsub.publisher
   on topic  chimera-fsu1b-events
 ```
+
+#### Subscription limit (2026-09-03)
+
+Betfair caps how many markets one stream subscription may hold.
+Chimera's allocation was raised **200 → 1,000 markets per session on
+2026-06-08** — Betfair request 56184, application id 137035,
+application name `intakehub`.
+
+The ceiling is a **setting, not a constant**:
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `subscription_limit` | `1000` | The granted allocation |
+| `subscription_warn_pct` | `0.9` | Warn at this fraction of the limit |
+
+Both persist to GCS and are editable through `PUT /admin/config`, so a
+future allocation change needs no redeploy (CHI-POL-006 — env vars
+carry deploy-time identity only, never tunable settings).
+
+`GET /admin/status.subscriptions` exposes the live count against the
+limit. `market_count` is proxied from the market cache and can briefly
+overstate, because CLOSED markets stay cached until the 300s
+maintenance sweep evicts them.
+
+**Why warn rather than fail:** the ceiling is not a soft cap. Betfair
+answers the `marketSubscription` with `SUBSCRIPTION_LIMIT_EXCEEDED`,
+which fails the whole subscription and drops the stream — and because
+the supervisor retries the identical filter, it gets the identical
+error and backs off toward `reconnect_max_backoff_s` (300s). The
+gateway therefore warns at 90% (`gateway_subscription_warning`, plus a
+`subscription_warning` activity row), and if the ceiling is hit anyway
+it logs an explicit `subscription_limit_exceeded` row naming the filter
+so the cause is legible as configuration rather than network.
+
+**Note the live filter is currently narrower than the code defaults.**
+GCS holds `event_type_ids: ["7"]` and `market_types: ["WIN"]` — horse
+racing WIN only — against code defaults of `("7","1","2")` and
+`("WIN","PLACE","MATCH_ODDS")`. That narrowing was a workaround for the
+old 200 ceiling (Phase 5 T2 recorded 198 markets against it). With
+1,000 available the filter can be widened again, which is what unblocks
+FSU2C.
 
 #### Portal proxy (CHI-ADR-014 / CHI-POL-006)
 

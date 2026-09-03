@@ -58,12 +58,16 @@ def _session_state(info, *, include_clk: bool) -> SessionState:
 
 
 async def _subscriptions_summary() -> SubscriptionsSummary:
+    from services import subscription_guard
+
     counts = await market_cache.count_by_event_type()
     total = sum(counts.values())
     by_sport = {
         SPORT_BY_EVENT_TYPE.get(et, et): n for et, n in counts.items()
     }
-    return SubscriptionsSummary(market_count=total, by_sport=by_sport)
+    return SubscriptionsSummary(
+        market_count=total, by_sport=by_sport, **subscription_guard.level(total)
+    )
 
 
 @router.get("/status", response_model=AdminStatusResponse)
@@ -89,6 +93,8 @@ def get_config() -> AdminConfigResponse:
         market_types=list(s.market_types),
         stream_check_interval_s=s.stream_check_interval_s,
         stream_stale_threshold_s=s.stream_stale_threshold_s,
+        subscription_limit=s.subscription_limit,
+        subscription_warn_pct=s.subscription_warn_pct,
         dry_run=s.dry_run,
         auto_start=s.auto_start,
         log_level=s.log_level,

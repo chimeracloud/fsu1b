@@ -75,6 +75,22 @@ class Settings:
         "SP_PROJECTED",
     )
 
+    # Stream subscription ceiling.
+    # Betfair caps the markets a single stream subscription may hold.
+    # Chimera's allocation was raised 200 -> 1,000 markets per session
+    # on 2026-06-08 (Betfair request 56184, application id 137035,
+    # application name `intakehub`).
+    #
+    # This is a SETTING, not a constant and not an env var: it is
+    # persisted to GCS and editable via PUT /admin/config per
+    # CHI-POL-006, so a future allocation change needs no redeploy.
+    subscription_limit: int = 1000
+    # Fraction of `subscription_limit` at which the gateway warns.
+    # Warning early matters because the ceiling itself is not a soft
+    # cap: Betfair answers with SUBSCRIPTION_LIMIT_EXCEEDED and drops
+    # the whole subscription.
+    subscription_warn_pct: float = 0.9
+
     # Watchdog (SC go-ahead Phase 2).
     stream_check_interval_s: int = 30
     stream_stale_threshold_s: int = 60

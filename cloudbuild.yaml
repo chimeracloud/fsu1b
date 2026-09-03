@@ -1,8 +1,15 @@
 # Cloud Build pipeline for FSU1B.
 #
-# Used by the GitHub trigger that fires on every push to `main`. The
-# first deploy (DEPLOY.md Step 10) is still manual via `gcloud run
-# deploy --source=.`; from then on every push redeploys automatically.
+# Used by the GitHub trigger that fires on every push to `main`.
+#
+# 2026-09-03: the trigger was repointed at THIS file. Until then it ran
+# an auto-generated inline build whose deploy step was
+# `gcloud run services update --image --labels`, which updates the
+# image and nothing else — so none of the flags below had ever been
+# applied. The service was running min-instances=0 / max-instances=20
+# / CPU-throttled, which both kills a persistent stream (scale to zero)
+# and lets Cloud Run run several instances that each hold their own
+# LIVE-key Betfair session. min=1/max=1 is load-bearing, not tuning.
 #
 # Build → push image → `gcloud run deploy` with the locked flags from
 # DEPLOY.md Step 10. `--update-env-vars=` is intentionally empty so
@@ -48,6 +55,9 @@ steps:
       - --project=${PROJECT_ID}
       - --service-account=${_SA}
       - --no-allow-unauthenticated
+      # Traceability: which commit is serving, readable from
+      # `gcloud run services describe`.
+      - --labels=managed-by=cloud-build,commit-sha=$COMMIT_SHA,gcb-build-id=$BUILD_ID
       - --min-instances=1
       - --max-instances=1
       - --cpu=1
