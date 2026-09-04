@@ -1,5 +1,35 @@
 # FSU1B — Phase 5 Testing Results
 
+> ## ⚠ FSU1B CANNOT PLACE A REAL ORDER
+>
+> **`dry_run` is `true`** in
+> `gs://chiops-betfair-recording/config/fsu1b.json`. Every call to
+> `POST /orders/place`, `/orders/cancel` and `/orders/replace` is
+> **simulated**: no request reaches Betfair, and the response is
+> synthesised with `betfair.status = "SUCCESS"` and a `betId` prefixed
+> `DRY-`. A caller that does not check the `dry_run` field in the
+> response cannot tell a simulated fill from a real one.
+>
+> **This is deliberate and correct as of 2026-09-04.** FSU1B has no
+> downstream consumer yet — Live Betting Control does not exist, and
+> the live engine `fsu100-track1` talks to Betfair directly rather
+> than through the gateway. There is nothing on the other side to
+> place an order for.
+>
+> **Flip it when there is something on the other side, not before.**
+> Until then, no downstream engine can trade through FSU1B, and T6
+> (below) is the only sanctioned real-money call.
+>
+> ```bash
+> # Check what is actually persisted — not the in-memory value:
+> gcloud storage cat gs://chiops-betfair-recording/config/fsu1b.json | jq .dry_run
+> ```
+>
+> Note the June T5 entry records `dry_run` being restored to `false`
+> in memory. The GCS blob nonetheless reads `true`, which is the value
+> that governs after any container restart. **Trust the blob, not the
+> test log.**
+
 **Date started:** 2026-06-03
 **Operator:** Charles + Claude (autonomous runner for T1–T5, T7 baseline, T8)
 **`$SERVICE_URL`:** `https://fsu1b-991649774709.europe-west2.run.app`
@@ -637,6 +667,19 @@ validity of a soak.
    could collide with itself.** Any scale-out boots another container,
    which reads `auto_start: true` and opens its own LIVE-key session.
 
+4. **The reconnect backoff never reset** (fixed 2026-09-04). It grew
+   with the session's lifetime reconnect count rather than with the
+   severity of the current outage, pinning at 300s after ~9
+   reconnects. This would have distorted any soak: recovery times
+   would have lengthened through the run and read as degradation.
+
+5. **`stop()` left `live_session.state` reading `active`** (fixed
+   2026-09-04). `/admin/status` now reports `stopped`, and a new
+   `token_cached` field distinguishes "no stream held" from "no
+   credential held" — the cached certlogin token is deliberately kept
+   across a stop so a stop/start cycle does not force a fresh login
+   against Betfair's login rate limits.
+
 **A soak run before the corrected flags are deployed proves nothing** —
 with `min-instances=0` the container can be reclaimed mid-soak, and the
 stream would die without a drop event ever being published.
@@ -654,7 +697,7 @@ stream would die without a drop event ever being published.
 | 1 | Corrected flags deployed | `min-instances=1`, `max-instances=1` on the serving revision |
 | 2 | `fsu100-track1` not trading | LIVE-key stream collision otherwise |
 | 3 | Stream started deliberately | `POST /admin/control/start`, then `/admin/status.stream.stream_status == "connected"` |
-| 4 | **`dry_run` is `false`** | It is currently **`true`** in GCS — T5 restored it in memory but the blob still reads `true` |
+| 4 | **`dry_run` set to `false` for the duration of T6 only** | It is `true` in GCS by policy; Step 1 turns it off, Step 6 puts it back |
 | 5 | Orders not paused | `/admin/status` after `POST /admin/control/resume` if unsure |
 | 6 | Eyes on Betfair web UI | Independent confirmation the bet is real |
 
@@ -783,10 +826,16 @@ curl -s -X PUT -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/j
   -d '{"dry_run": true}' "$SERVICE_URL/admin/config" | jq .dry_run
 ```
 
-Decide deliberately whether `dry_run` should end `true` or `false`.
-It is `true` in GCS today, which means **order writes are simulated**.
-FSU1B cannot place real orders for any downstream engine until it is
-`false`.
+**`dry_run` must end `true`.** That is the settled position as of
+2026-09-04 (see the banner at the top of this file): FSU1B has no
+downstream consumer, so there is nothing that should be able to place
+a real order through it. T6 is a one-off proof that the LIVE-key write
+path works, not a change of operating mode — put the safety back on
+when it is done, and confirm it persisted:
+
+```bash
+gcloud storage cat gs://chiops-betfair-recording/config/fsu1b.json | jq .dry_run
+```
 
 ### If it partially matches
 
@@ -961,22 +1010,27 @@ receiving proxied traffic while blind.
 | `gateway_daily_summary` | Fires at 00:00 UTC |
 | Instance count | Stays at 1 for the whole soak |
 
-### Known defect that will distort the soak
+### Backoff defect — FIXED 2026-09-04
 
-`StreamSession._stream_supervisor` initialises `backoff = 1` once, then
-doubles it on **every** loop iteration and never resets it after a
-successful connection (`services/stream_session.py:167`, `:239`). The
-backoff is therefore a function of how many times the session has *ever*
-reconnected, not of how badly the current reconnect is going. After
-about nine reconnects it pins at `reconnect_max_backoff_s` (300s), so a
-drop late in a 24-hour soak costs five minutes of downtime where the
-first drop cost one second.
+`StreamSession._stream_supervisor` used to initialise `backoff = 1`
+once and then double it on **every** loop iteration, never resetting
+after a connection that came up. The backoff measured how many times
+the session had *ever* reconnected rather than how badly the current
+reconnect was going, pinning at `reconnect_max_backoff_s` (300s) after
+about nine reconnects.
 
-This has not been changed — it is outside the brief's scope and the
-code is working as written. Flagged because it will show up as
-increasing recovery times across the soak and should not be
-misread as degradation. The fix is to reset `backoff = 1` after a
-connection that stayed up.
+Fixed: the backoff resets to its 1s floor after any attempt that
+reached `connected`. A connection that dies before the announcer
+observes it does **not** reset the backoff, so genuine flapping still
+backs off exponentially.
+
+Covered by `tests/test_supervisor_backoff.py`, which asserts the
+growth phase, the reset, and the cap. Those tests were confirmed to
+fail against the pre-fix code.
+
+**Soak expectation:** recovery time should now be flat across the 24
+hours. A recovery time that lengthens through the run means the reset
+is not firing — treat that as a fail, not as normal degradation.
 
 ### Result
 

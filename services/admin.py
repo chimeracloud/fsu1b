@@ -45,8 +45,9 @@ from services.stream_session import stream_session
 router = APIRouter(prefix="/admin", tags=["admin"])
 
 
-def _session_state(info, *, include_clk: bool) -> SessionState:
+def _session_state(info, *, include_clk: bool, key: str) -> SessionState:
     from services import stream_client
+    from services.betfair_auth import has_token
 
     return SessionState(
         state=info.state,
@@ -54,6 +55,7 @@ def _session_state(info, *, include_clk: bool) -> SessionState:
         last_keepalive=info.last_keepalive,
         last_clk=(stream_client.cursors()["clk"] if include_clk else None),
         last_error=info.last_error,
+        token_cached=has_token(key),
     )
 
 
@@ -76,8 +78,12 @@ async def status(request: Request) -> AdminStatusResponse:
         service=SERVICE_NAME,
         version=VERSION,
         phase=PHASE,
-        live_session=_session_state(app_state.live_session, include_clk=True),
-        delayed_session=_session_state(app_state.delayed_session, include_clk=False),
+        live_session=_session_state(
+            app_state.live_session, include_clk=True, key="live",
+        ),
+        delayed_session=_session_state(
+            app_state.delayed_session, include_clk=False, key="delayed",
+        ),
         subscriptions=await _subscriptions_summary(),
         stream=stream_session.status(),
         now=datetime.now(timezone.utc),

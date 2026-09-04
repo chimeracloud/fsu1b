@@ -70,6 +70,13 @@ class StreamSession:
         self._watchdog_drop: bool = False
         self._drop_announced: bool = False  # de-dup gateway_session_dropped
 
+        # True once the CURRENT connection attempt reached 'connected'.
+        # Reset before every attempt; the supervisor uses it to decide
+        # whether to reset the reconnect backoff. Distinct from
+        # `_was_connected`, which latches for the whole session and so
+        # cannot tell one attempt from the next.
+        self._conn_established: bool = False
+
     @property
     def is_running(self) -> bool:
         return self._running
@@ -85,6 +92,7 @@ class StreamSession:
         self._was_connected = False
         self._watchdog_drop = False
         self._drop_announced = False
+        self._conn_established = False
         app_state.stream_status = "connecting"
         app_state.add_activity("session_start", "starting LIVE stream + workers")
 
@@ -112,6 +120,19 @@ class StreamSession:
         self._tasks.clear()
         self._current_conn = None
         app_state.stream_status = "disconnected"
+
+        # Report the session as stopped, not 'active'. `betfair_auth`
+        # last set 'active' at certlogin and nothing since then had
+        # reason to revise it, so without this the gateway would claim
+        # an active LIVE session while holding no stream at all — the
+        # kind of status that gets an incident misdiagnosed.
+        #
+        # The cached certlogin token is deliberately NOT dropped: a
+        # stop/start cycle would then force a fresh certlogin every
+        # time, against Betfair's login rate limits. /admin/status
+        # reports what is actually held via `token_cached`.
+        app_state.live_session.state = "stopped"
+
         app_state.add_activity("session_stop", "stream stopped")
         return {"accepted": True, "detail": "stopped"}
 
@@ -229,6 +250,27 @@ class StreamSession:
             finally:
                 self._current_conn = None
 
+            # Reset the backoff whenever the attempt actually reached
+            # 'connected'. Without this the backoff is a function of how
+            # many times the session has EVER reconnected rather than of
+            # how badly the current reconnect is going: it doubles on
+            # every iteration and pins at reconnect_max_backoff_s (300s)
+            # after ~9 reconnects, so a drop late in a long session
+            # costs five minutes of missed market data where the first
+            # drop cost one second.
+            #
+            # A connection that came up and died before the announcer's
+            # 0.5s poll observed it leaves the flag False — which is
+            # correct, because that is flapping and should back off.
+            if self._conn_established:
+                if backoff != 1:
+                    logger.info(
+                        "Connection was established — resetting backoff %ds -> 1s",
+                        backoff,
+                    )
+                backoff = 1
+            self._conn_established = False
+
             wait = min(backoff, max_b)
             logger.info("Reconnecting in %ds (backoff=%d)", wait, backoff)
             try:
@@ -245,6 +287,9 @@ class StreamSession:
         try:
             while self._running:
                 if app_state.stream_status == "connected":
+                    # This attempt reached 'connected' — the supervisor
+                    # reads this to reset the reconnect backoff.
+                    self._conn_established = True
                     if not self._was_connected:
                         # First-ever connect for this session — no event.
                         self._was_connected = True

@@ -16,6 +16,7 @@ SessionStateLiteral = Literal[
     "active",
     "reconnecting",
     "failed",
+    "stopped",
 ]
 
 
@@ -28,6 +29,17 @@ class SessionState(BaseModel):
         description="Stream resub cursor (LIVE session only).",
     )
     last_error: str | None = None
+    token_cached: bool = Field(
+        default=False,
+        description=(
+            "Whether a Betfair certlogin token for this key is still held "
+            "in memory. `stop()` closes the stream but deliberately keeps "
+            "the token, so that a stop/start cycle does not force a fresh "
+            "certlogin against Betfair's login rate limits. State "
+            "'stopped' with token_cached true is the normal post-stop "
+            "shape: no stream connection is held, only a credential."
+        ),
+    )
 
 
 class SubscriptionsSummary(BaseModel):

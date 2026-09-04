@@ -163,6 +163,16 @@ def _do_keepalive_sync(creds: dict, token: str) -> bool:
     return body.get("status") == "SUCCESS"
 
 
+def has_token(key: KeyKind) -> bool:
+    """True when a certlogin token for `key` is held in memory.
+
+    Read-only; used by /admin/status so an operator can tell the
+    difference between "no credential held" and "credential held but no
+    stream running".
+    """
+    return _stores[key].token is not None
+
+
 def reset_sessions_for_test() -> None:
     for s in _stores.values():
         s.token = None

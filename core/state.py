@@ -21,7 +21,12 @@ StreamStatus = Literal[
     "disconnected", "connecting", "connected", "reconnecting", "failed"
 ]
 SessionStatus = Literal[
-    "not_started", "logging_in", "active", "reconnecting", "failed"
+    "not_started", "logging_in", "active", "reconnecting", "failed",
+    # Deliberately stopped by the operator. Distinct from "not_started"
+    # (never logged in) and from "active" (stream running). A stopped
+    # session reporting "active" is how the next incident gets
+    # misdiagnosed, so stop() sets this explicitly.
+    "stopped",
 ]
 
 

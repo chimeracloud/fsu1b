@@ -28,6 +28,7 @@ Full architecture: `audit/reports/FSU1B_Betfair_Gateway_Architecture.md`.
 | 4.1 — Real signals | done | `last_message_at_by_sport` + `last_call_at_by_endpoint` in `/admin/stats`; `log_level` + `market_hours_*` in `/admin/config` |
 | 5 — Testing | T1–T5 + T8 PASS | T6 (real £2) + T7 (24h soak) pending operator. Results in `PHASE5_RESULTS.md` |
 | 5.1 — Subscription limit | done | 200 → 1,000 as a GCS-persisted setting, live count exposed, 90% warning |
+| 5.2 — Supervisor hardening | done | Reconnect backoff resets after a successful connection; `stop()` reports `stopped` and `token_cached` |
 
 ## Deployment
 
@@ -96,6 +97,11 @@ pytest -q
 
 - `GET /admin/status` — real LIVE-session + stream state + subscription counts
   (incl. `subscriptions.limit`, `warn_at`, `pct_of_limit`, `at_warning_level`)
+  - `live_session.state` is `stopped` after `POST /admin/control/stop` —
+    never `active`. `token_cached` says whether a certlogin token is
+    still held, so "no stream" and "no credential" are distinguishable.
+    A stop deliberately keeps the token: dropping it would force a fresh
+    certlogin on every stop/start cycle.
 - `GET /admin/config` — incl. `log_level`, `market_hours_start_utc`,
   `market_hours_end_utc`, `subscription_limit`, `subscription_warn_pct`
 - `PUT /admin/config` — persists to GCS; 502 if persistence fails (in-memory change still applies, retry)
